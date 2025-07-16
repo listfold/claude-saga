@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# Running claude verbose / log mode with ctrl+r will show log output with hook success/failure.
+
 # Create a file called foo.txt
 touch foo.txt
 
