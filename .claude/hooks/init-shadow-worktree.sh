@@ -38,8 +38,8 @@ parse_hook_input || exit 1
 # ============================================================================
 
 # Set up paths in .claude directory
-SHADOW_DIR="$MAIN_REPO_ROOT/.claude/efficient-undo/session-$SESSION_ID-worktree"
-INITIAL_STATE_FILE="$MAIN_REPO_ROOT/.claude/efficient-undo/session-$SESSION_ID-initial.patch"
+SHADOW_DIR="$MAIN_REPO_ROOT/.claude/efficient-undo/sessions/$SESSION_ID/session-$SESSION_ID-worktree"
+INITIAL_STATE_FILE="$MAIN_REPO_ROOT/.claude/efficient-undo/sessions/$SESSION_ID/session-$SESSION_ID-initial.patch"
 
 # Check if shadow worktree already exists
 if git worktree list | grep -q "$SHADOW_DIR"; then
@@ -51,6 +51,9 @@ if git worktree list | grep -q "$SHADOW_DIR"; then
 fi
 
 log_info "Initializing shadow worktree for session $SESSION_ID"
+
+# Ensure the directory exists for the patch file
+mkdir -p "$(dirname "$INITIAL_STATE_FILE")"
 
 # Capture current state including uncommitted changes
 git add -N . 2>/dev/null || true

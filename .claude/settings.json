@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run /Users/iain/Desktop/Projects/sporran/.claude/hooks/init.py"
+          }
+        ]
+      }
+    ]
+  }
+}
