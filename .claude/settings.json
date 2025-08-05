@@ -1,12 +1,12 @@
 {
   "hooks": {
-    "PreToolUse": [
+    "SessionStart": [
       {
-        "matcher": "",
+        "matcher": "startup|resume",
         "hooks": [
           {
             "type": "command",
-            "command": "uv run /Users/iain/Desktop/Projects/sporran/.claude/hooks/init.py"
+            "command": "DEBUG_PYCHARM=1 uv run /Users/iain/Desktop/Projects/sporran/.claude/hooks/init.py"
           }
         ]
       }
