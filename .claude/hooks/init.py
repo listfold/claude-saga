@@ -13,10 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pydevd_pycharm
-pydevd_pycharm.settrace('localhost', port=12345, stdoutToServer=True, stderrToServer=True)
-
-# Debug setup - only when DEBUG_PYCHARM is set
+# Debug using pycharm.
 if os.environ.get("DEBUG_PYCHARM") == "1":
     import pydevd_pycharm
     pydevd_pycharm.settrace('localhost', port=12345, stdoutToServer=True, stderrToServer=True)
@@ -57,24 +54,42 @@ def output_json_response(continue_flag, suppress_output, system_message, **kwarg
     response.update(kwargs)
     return response
 
+
+def add_claude_to_gitignore():
+    """Add .claude/git/ to .gitignore using shell command"""
+    git_root = get_git_root()
+    if not git_root:
+        log_error("Not in a git repository")
+        return False
+
+    # Check if .claude/git/ already exists in .gitignore
+    check_result = run_command("grep -q '^\.claude/git' .gitignore", cwd=git_root)
+    if check_result and check_result.returncode == 0:
+        log_info(".claude/git/ already exists in .gitignore")
+        return True
+
+    # Add .claude/git/ to .gitignore
+    result = run_command("echo '.claude/git/' >> .gitignore", cwd=git_root)
+
+    if result and result.returncode == 0:
+        log_info("Added .claude/git/ to .gitignore")
+        return True
+    else:
+        log_error("Failed to add .claude/git/ to .gitignore")
+        return False
+
+
+
 def init_shadow_worktree(input_data):
     """Initialize git shadow worktree for AI undo tracking"""
     
     # Get session_id and transcript_path from input
     session_id = input_data.get("session_id")
-    transcript_path = input_data.get("transcript_path")
-    
+
     if not session_id:
         log_error("No session_id found in JSON input")
         return output_json_response(False, False, "ERROR: No session_id found in input")
-    
-    if not transcript_path:
-        log_error("No transcript_path found in JSON input")
-        return output_json_response(False, False, "ERROR: No transcript_path found in input")
-    
-    log_debug(f"Session ID: {session_id}")
-    log_debug(f"Transcript Path: {transcript_path}")
-    
+
     # Get git root
     main_repo_root = get_git_root()
     if not main_repo_root:
@@ -83,27 +98,39 @@ def init_shadow_worktree(input_data):
 
     # check that claude is running from the gh root.
     if not main_repo_root == input_data.get("cwd"):
-        log_error("ERROR: Run claude code from the repo's root")
+        log_error("ERROR: Run claude from the repo's root")
+        return output_json_response(False, False, "ERROR: Not running from the repo's root")
 
     # Change to repo root
     os.chdir(main_repo_root)
-    
+
     # Set up paths in .claude directory
-    shadow_dir = Path(main_repo_root) / ".claude" / "efficient-undo" / "sessions" / session_id / f"session-{session_id}-worktree"
-    initial_state_file = Path(main_repo_root) / ".claude" / "efficient-undo" / "sessions" / session_id / f"session-{session_id}-initial.patch"
-    
+    claude_git_dir = Path(main_repo_root) / ".claude" / "git"
+    shadow_dir = claude_git_dir / "sessions"/ session_id / f"session-{session_id}-worktree"
+    initial_state_file = claude_git_dir / "sessions" / session_id / f"session-{session_id}-initial.patch"
+
+    # TODO: set git commiter username and email
+
     # Check if shadow worktree already exists
     worktree_list = run_command("git worktree list")
     if worktree_list and str(shadow_dir) in worktree_list.stdout:
         log_info(f"Shadow worktree already exists for session {session_id}")
         return output_json_response(True, False, f"Shadow worktree already exists for session {session_id}",
                                   session_id=session_id, shadow_dir=str(shadow_dir))
+
+    # Check if .claude/git/ is in .gitignore and add it if necessary
+    if not add_claude_to_gitignore():
+        log_error("Failed to update .gitignore")
+        return output_json_response(False, False, "ERROR: Failed to update .gitignore")
+
+    run_command("git init")
     
     log_info(f"Initializing shadow worktree for session {session_id}")
     
     # Ensure the directory exists for the patch file
     initial_state_file.parent.mkdir(parents=True, exist_ok=True)
-    
+
+
     # Capture current state including uncommitted changes
     run_command("git add -N .", capture_output=False)
     
