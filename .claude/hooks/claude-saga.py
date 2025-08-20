@@ -28,7 +28,8 @@ class EffectType(Enum):
     PUT = auto()       # Update state
     SELECT = auto()    # Select from state
     LOG = auto()       # Log a message
-    FINISH = auto()    # Finish the saga and output state
+    STOP = auto()      # Stop the saga execution with error
+    COMPLETE = auto()  # Stop the saga execution with success
 
 
 @dataclass
@@ -72,10 +73,17 @@ class Log(Effect):
 
 
 @dataclass
-class Finish(Effect):
-    """Effect for finishing the saga and outputting the current state"""
+class Stop(Effect):
+    """Effect for stopping the saga execution with error"""
     def __init__(self, message: Optional[str] = None):
-        super().__init__(EffectType.FINISH, message)
+        super().__init__(EffectType.STOP, message)
+
+
+@dataclass
+class Complete(Effect):
+    """Effect for completing the saga execution with success"""
+    def __init__(self, message: Optional[str] = None):
+        super().__init__(EffectType.COMPLETE, message)
 
 
 # ============================================================================
@@ -95,11 +103,7 @@ class BaseSagaState:
     continue_: bool = True  # Whether Claude should continue after hook execution
     stopReason: Optional[str] = None  # Message shown when continue is false
     suppressOutput: bool = False  # Hide stdout from transcript mode
-    systemMessage: Optional[str] = None  # Optional message to display
-    
-    # Internal state management
-    success: bool = True
-    error_message: Optional[str] = None
+    systemMessage: Optional[str] = None  # Optional message to display, shown when continue is true
     
     # Raw input data for additional fields
     input_data: Optional[dict] = None
@@ -124,7 +128,6 @@ class BaseSagaState:
         response.update(self.metadata)
         
         return response
-
 
 # ============================================================================
 # Common Side Effect Functions (Impure)
@@ -205,8 +208,6 @@ def connect_pycharm_debugger_effect():
     except Exception as e:
         raise RuntimeError(f"Could not connect to debugger: {e}")
 
-
-
 # ============================================================================
 # Saga Runtime
 # ============================================================================
@@ -216,15 +217,14 @@ class SagaRuntime:
     
     def __init__(self, initial_state: BaseSagaState):
         self.state = initial_state
-        self.cancelled = False
-        self.cancel_reason = None
+        self.stopped = False
     
     def run(self, saga: Generator) -> BaseSagaState:
         """Run a saga to completion"""
         saga_name = saga.gi_code.co_name if hasattr(saga, 'gi_code') else 'unknown'
         try:
             effect = None
-            while not self.cancelled:
+            while not self.stopped:
                 try:
                     yielded = saga.send(effect)
                     effect = self._handle_effect(yielded)
@@ -232,8 +232,8 @@ class SagaRuntime:
                     break
         except Exception as e:
             log_error(f"Saga runtime error in '{saga_name}': {e}")
-            self.state.success = False
-            self.state.error_message = str(e)
+            self.state.continue_ = False
+            self.state.stopReason = f"Saga runtime error: {e}"
         
         return self.state
     
@@ -251,8 +251,10 @@ class SagaRuntime:
                 return self._handle_select(effect)
             case EffectType.LOG:
                 return self._handle_log(effect)
-            case EffectType.FINISH:
-                return self._handle_finish(effect)
+            case EffectType.STOP:
+                return self._handle_stop(effect)
+            case EffectType.COMPLETE:
+                return self._handle_complete(effect)
             case _:
                 return None
     
@@ -288,27 +290,20 @@ class SagaRuntime:
             case "error":
                 log_error(effect.message)
     
-    def _handle_finish(self, effect: Finish) -> None:
-        """Handle a FINISH effect - end saga and output state"""
-        self.cancelled = True  # Stop the saga execution
+    def _handle_stop(self, effect: Stop) -> None:
+        """Handle a STOP effect - stop saga execution with error"""
+        self.stopped = True
+        self.state.continue_ = False
+        if effect.payload:  # Set stopReason from the Stop message
+            self.state.stopReason = effect.payload
+    
+    def _handle_complete(self, effect: Complete) -> None:
+        """Handle a COMPLETE effect - stop saga execution with success"""
+        self.stopped = True
+        self.state.continue_ = True
+        if effect.payload:  # Set systemMessage from the Complete message
+            self.state.systemMessage = effect.payload
         
-        # If a message was provided, log it
-        if effect.payload:
-            if self.state.continue_:
-                log_info(f"Saga finished: {effect.payload}")
-            else:
-                log_error(f"Saga finished: {effect.payload}")
-
-        # The state already has all the necessary fields set
-        # Just output it and exit
-        print(json.dumps(self.state.to_json()))
-
-        # Exit with appropriate code based on continue_ field
-        if self.state.continue_:
-            sys.exit(0)
-        else:
-            sys.exit(1)
-
 
 # ============================================================================
 # Common Hook Sagas
@@ -317,16 +312,11 @@ class SagaRuntime:
 def validate_input_saga():
     """Validate that input is provided via stdin"""
     if sys.stdin.isatty():
-        yield Put({
-            "continue_": False,
-            "stopReason": "No input provided. This script expects JSON input via stdin.",
-            "error_message": "No input provided"
-        })
-        yield Finish("No input provided")
+        yield Stop("No input provided. This script expects JSON input via stdin.")
 
 
 def parse_json_saga():
-    """Parse JSON input from stdin and populate state fields"""
+    """Parse CC hooks default / standard JSON input from stdin - see CC hooks docs - https://docs.anthropic.com/en/docs/claude-code/hooks """
     try:
         input_data = json.load(sys.stdin)
         
@@ -348,9 +338,4 @@ def parse_json_saga():
             yield Put(update)
             
     except json.JSONDecodeError as e:
-        yield Put({
-            "continue_": False,
-            "stopReason": f"Invalid JSON input: {e}",
-            "error_message": f"Invalid JSON input: {e}"
-        })
-        yield Finish(f"Invalid JSON input: {e}")
+        yield Stop(f"Invalid JSON input: {e}")

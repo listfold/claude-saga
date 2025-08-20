@@ -26,7 +26,7 @@ spec.loader.exec_module(claude_saga)
 
 from claude_saga import (
     BaseSagaState, SagaRuntime,
-    Call, Put, Select, Log, Finish,
+    Call, Put, Select, Log, Stop, Complete,
     run_command_effect, write_file_effect, 
     change_directory_effect, create_directory_effect,
     log_debug, connect_pycharm_debugger_effect,
@@ -40,384 +40,180 @@ class InitSagaState(BaseSagaState):
     git_root: Optional[str] = None
     claude_git_dir: Optional[Path] = None
     shadow_dir: Optional[Path] = None
-    initial_state_file: Optional[Path] = None
-    last_session_file: Optional[Path] = None
-    last_session_data: Optional[dict] = None
-    current_commit: Optional[str] = None
-
 
 def pycharm_debug_saga():
     """Connect to PyCharm debugger if DEBUG_PYCHARM env var is set"""
-    # Check if debug mode is enabled
     if os.environ.get("DEBUG_PYCHARM") != "1":
         return
-
-    yield Log("info", "PyCharm debug mode enabled, attempting to connect to debugger...")
-
-    # Try to connect to the debugger
     connected = yield Call(connect_pycharm_debugger_effect)
-
-    # If connection failed (returned None due to exception), cancel
     if not connected:
-        yield Log("error", "Failed to connect to PyCharm debugger")
-        yield Log("error", "Check that pydevd-pycharm is installed and debugger is waiting")
-        yield Put({
-            "continue_": False,
-            "stopReason": "Failed to connect to PyCharm debugger"
-        })
-        yield Finish("Failed to connect to PyCharm debugger")
-    else:
-        yield Log("info", "Successfully connected to PyCharm debugger")
+        yield Stop("Failed to connect to PyCharm debugger")
 
-
-def validate_session_saga():
-    """Validate that session_id exists in input"""
+def setup_and_validate_saga():
     state = yield Select()
     
-    if not state.session_id:
-        yield Log("error", "No session_id found")
-        yield Put({
-            "success": False,
-            "error_message": "ERROR: No session_id",
-            "continue_": False,
-            "suppressOutput": False,
-            "systemMessage": "ERROR: No session_id",
-            "stopReason": "No session_id"
-        })
-        yield Finish("No session_id found")
-
-
-def check_git_repository_saga():
-    """Check if we're in a git repository and get its root"""
+    # Check git repository and get root
     result = yield Call(run_command_effect, "git rev-parse --show-toplevel")
-    
     if not result or result.returncode != 0:
-        yield Log("error", "Not a git repo, init git to use this tool")
-        yield Put({
-            "success": False,
-            "error_message": "ERROR: Not a git repository",
-            "continue_": False,
-            "suppressOutput": False,
-            "systemMessage": "ERROR: Not a git repository",
-            "stopReason": "Not a git repository"
-        })
-        yield Finish("Not a git repository")
+        yield Stop("Not a git repository, run git init in project root to use this tool.")
     
     git_root = result.stdout.strip()
-    yield Put({"git_root": git_root})
-
-
-def validate_working_directory_saga():
-    """Ensure Claude is running from the repo root"""
-    state = yield Select()
     
-    if state.git_root != state.cwd:
-        yield Log("error", "ERROR: Run claude from the repo's root")
-        yield Put({
-            "success": False,
-            "error_message": "ERROR: Not running from the repo's root",
-            "continue_": False,
-            "suppressOutput": False,
-            "systemMessage": "ERROR: Not running from the repo's root",
-            "stopReason": "Not running from the repo's root"
-        })
-        yield Finish("Not running from repo root")
+    # Ensure CC is running from the repo root
+    if git_root != state.cwd:
+        yield Stop("Claude Code is not running from the repo's root, run claude code from the repo root to use this tool.")
     
-    # Change to repo root
-    yield Call(change_directory_effect, state.git_root)
+    # Change hook's execution context to repo root.
+    yield Call(change_directory_effect, git_root)
 
+    # Setup paths, store them in state
+    claude_git_dir = Path(git_root) / ".claude" / "git"
+    shadow_dir = claude_git_dir / "shadow-worktree"  # Persistent shadow worktree
 
-def setup_paths_saga():
-    """Set up all required paths"""
-    state = yield Select()
+    # Create required directories
+    yield Call(create_directory_effect, claude_git_dir)
+    yield Call(create_directory_effect, shadow_dir)
+
+    # Ensure claude_git_dir is in .gitignore, add it if not
+    check_result = yield Call(run_command_effect, f"grep -q '{claude_git_dir.relative_to(git_root)}' .gitignore", cwd=git_root)
+    if check_result.returncode != 0:
+        yield Call(run_command_effect, f"echo '{claude_git_dir.relative_to(git_root)}/' >> .gitignore", cwd=git_root)
+        yield Log("info", f"Added {claude_git_dir.relative_to(git_root)}/ to .gitignore")
     
-    claude_git_dir = Path(state.git_root) / ".claude" / "git"
-    shadow_dir = claude_git_dir / "sessions" / state.session_id / f"session-{state.session_id}-worktree"
-    initial_state_file = claude_git_dir / "sessions" / state.session_id / f"session-{state.session_id}-initial.patch"
-    last_session_file = claude_git_dir / "last_session.json"
-    
+    # Update state with all collected info
     yield Put({
+        "git_root": git_root,
         "claude_git_dir": claude_git_dir,
         "shadow_dir": shadow_dir,
-        "initial_state_file": initial_state_file,
-        "last_session_file": last_session_file
     })
 
-
-def get_current_commit_saga():
-    """Get the current HEAD commit hash"""
-    result = yield Call(run_command_effect, "git rev-parse HEAD")
-    if result and result.returncode == 0:
-        current_commit = result.stdout.strip()
-        yield Put({"current_commit": current_commit})
-    else:
-        yield Log("error", "Failed to get current commit")
-        yield Put({
-            "continue_": False,
-            "stopReason": "Failed to get current commit"
-        })
-        yield Finish("Failed to get current commit")
-
-
-def check_for_session_reuse_saga():
-    """Check if we can reuse a previous session's worktree"""
-    state = yield Select()
-    
-    # Check if last_session.json exists
-    if not state.last_session_file.exists():
-        yield Log("debug", "No previous session found")
-        return
-    
-    # Read last session data
-    try:
-        with open(state.last_session_file, 'r') as f:
-            last_session_data = json.load(f)
-            yield Put({"last_session_data": last_session_data})
-    except Exception as e:
-        yield Log("error", f"Failed to read last session file: {e}")
-        return
-    
-    # Check if the repo has changed since last session
-    last_commit = last_session_data.get("commit")
-    last_session_id = last_session_data.get("session_id")
-    
-    if last_commit == state.current_commit:
-        # No changes, check if the last session's worktree still exists
-        last_shadow_dir = state.claude_git_dir / "sessions" / last_session_id / f"session-{last_session_id}-worktree"
-        worktree_list = yield Call(run_command_effect, "git worktree list")
-        
-        if worktree_list and str(last_shadow_dir) in worktree_list.stdout:
-            yield Log("info", f"Reusing existing session {last_session_id} (no repo changes detected)")
-            # Update paths to use the existing session
-            yield Put({
-                "session_id": last_session_id,
-                "shadow_dir": last_shadow_dir,
-                "initial_state_file": state.claude_git_dir / "sessions" / last_session_id / f"session-{last_session_id}-initial.patch",
-                "systemMessage": f"Reusing existing session {last_session_id} (no repo changes)"
-            })
-            # Add session info to metadata and finish
-            yield Put({
-                "metadata": {
-                    "session_id": last_session_id,
-                    "shadow_dir": str(last_shadow_dir)
-                }
-            })
-            yield Finish(f"Reusing existing session {last_session_id}")
-    else:
-        yield Log("info", f"Repo has changed since last session (was {last_commit[:8]}, now {state.current_commit[:8]})")
-
-
-def check_existing_worktree_saga():
-    """Check if shadow worktree already exists for current session"""
+def ensure_shadow_worktree_saga():
+    """Ensure the shadow worktree exists"""
     state = yield Select()
     worktree_list = yield Call(run_command_effect, "git worktree list")
-    
     if worktree_list and str(state.shadow_dir) in worktree_list.stdout:
-        yield Log("info", f"Shadow worktree already exists for session {state.session_id}")
-        yield Put({
-            "systemMessage": f"Shadow worktree already exists for session {state.session_id}"
-        })
-        # Add session info to metadata and finish
-        yield Put({
-            "metadata": {
-                "session_id": state.session_id,
-                "shadow_dir": str(state.shadow_dir)
-            }
-        })
-        yield Finish(f"Shadow worktree already exists for session {state.session_id}")
-
-
-def update_gitignore_saga():
-    """Add .claude/git/ to .gitignore if not already present"""
-    state = yield Select()
-    
-    # Check if .claude/git/ already exists in .gitignore
-    check_result = yield Call(run_command_effect, r"grep -q '.claude/git' .gitignore", cwd=state.git_root)
-    
-    if check_result.returncode == 0:
-        yield Log("info", ".claude/git/ already exists in .gitignore")
+        yield Log("info", "Shadow worktree already exists")
         return
-    
-    # Add .claude/git/ to .gitignore
-    result = yield Call(run_command_effect, "echo '.claude/git/' >> .gitignore", cwd=state.git_root)
-    
-    if not result or result.returncode != 0:
-        yield Put({
-            "success": False,
-            "error_message": "ERROR: Failed to update .gitignore",
-            "continue_": False,
-            "suppressOutput": False,
-            "systemMessage": "ERROR: Failed to update .gitignore",
-            "stopReason": "Failed to update .gitignore"
-        })
-        yield Finish("Failed to update .gitignore")
-    
-    yield Log("info", "Added .claude/git/ to .gitignore")
+    # Create shadow worktree if it doesn't exist
+    yield Log("info", "Creating shadow worktree")
 
-
-def initialize_git_saga():
-    """Initialize git if needed"""
-    state = yield Select()
-    yield Call(run_command_effect, "git init")
-    yield Log("info", f"Initializing shadow worktree for session {state.session_id}")
-
-
-def create_directories_saga():
-    """Ensure required directories exist"""
-    state = yield Select()
-    yield Call(create_directory_effect, state.initial_state_file.parent)
-
-
-def capture_initial_state_saga():
-    """Capture current state including uncommitted changes"""
-    state = yield Select()
-    
-    yield Call(run_command_effect, "git add -N .", capture_output=False)
-    
-    # Create the initial state patch
-    diff_result = yield Call(run_command_effect, "git diff HEAD")
-    
-    if diff_result and diff_result.returncode == 0:
-        yield Call(write_file_effect, state.initial_state_file, diff_result.stdout)
-
-
-def create_worktree_saga():
-    """Create detached worktree at current HEAD"""
-    state = yield Select()
-    
+    # Create new worktree at current HEAD (later any uncommitted changes in the main repo will be added to the shadow)
     worktree_result = yield Call(run_command_effect, f'git worktree add -d "{state.shadow_dir}" HEAD')
-    
     if not worktree_result or worktree_result.returncode != 0:
-        yield Put({
-            "success": False,
-            "error_message": "ERROR: Failed to create shadow worktree",
-            "continue_": False,
-            "suppressOutput": False,
-            "systemMessage": "ERROR: Failed to create shadow worktree",
-            "stopReason": "Failed to create shadow worktree"
-        })
-        yield Finish("Failed to create shadow worktree")
+        yield Stop("Failed to create shadow worktree")
+    
+    yield Log("info", f"Created shadow worktree at {state.shadow_dir}")
 
 
-def apply_initial_state_saga():
-    """Apply initial state to shadow worktree"""
+def synchronize_main_to_shadow_saga():
+    """ensure shadow worktree matches main repo state using git archive diff"""
     state = yield Select()
     
-    yield Call(change_directory_effect, str(state.shadow_dir))
+    # Use .claude/git directory for archive (already in .gitignore)
+    archive_dir = state.claude_git_dir / "main-archive"
     
-    # Apply the patch (ignore errors if patch is empty)
-    yield Call(run_command_effect, f'git apply "{state.initial_state_file}"', capture_output=False)
-    
-    # Add and commit changes
-    yield Call(run_command_effect, "git add -A", capture_output=False)
-    yield Call(run_command_effect, f'git commit --allow-empty -m "Initial state: session {state.session_id}"', capture_output=False)
-    
-    yield Log("info", "Shadow worktree initialized")
-    
-    # Return to main repo root
-    yield Call(change_directory_effect, state.git_root)
+    try:
+        # Create clean archive of main repo (we create a temp git archive because it respects .gitignore, useful snapshot of the main repo)
+        yield Call(change_directory_effect, state.git_root)
+        
+        # Clean up any previous archive
+        yield Call(run_command_effect, f'rm -rf "{archive_dir}"', capture_output=False)
+        
+        # Create archive directory
+        yield Call(create_directory_effect, archive_dir)
+        
+        # Extract git archive to archive directory
+        archive_result = yield Call(run_command_effect, 
+            f'git archive HEAD | tar -x -C "{archive_dir}"')
+        
+        if archive_result and archive_result.returncode != 0:
+            yield Stop("Failed to create git archive")
+        
+        # Generate diff between clean archive and shadow worktree
+        cross_diff_result = yield Call(run_command_effect, 
+            f'git diff --no-index "{archive_dir}" "{state.shadow_dir}"')
+        
+        cross_diff = ""
+        
+        # git diff --no-index returns exit code 1 when differences exist, 0 when identical
+        if cross_diff_result and cross_diff_result.returncode == 0:
+            yield Log("info", "Main repo and shadow worktree are already synchronized")
+            return
+        elif cross_diff_result and cross_diff_result.returncode == 1:
+            # Differences found - need to synchronize
+            cross_diff = cross_diff_result.stdout.strip()
+            yield Log("info", "Differences found, synchronizing shadow worktree with main repo")
+        else:
+            # Error occurred
+            yield Stop("Failed to generate cross-repo diff")
+        
+        # Change to shadow worktree directory
+        yield Call(change_directory_effect, str(state.shadow_dir))
+        
+        # Reset shadow worktree to clean state
+        yield Call(run_command_effect, "git reset --hard HEAD", capture_output=False)
+        yield Call(run_command_effect, "git clean -fd", capture_output=False)
+        
+        # Apply cross-repo changes if differences exist
+        if cross_diff:
+            # Write cross-repo diff to temporary file
+            diff_file = state.shadow_dir / "temp_cross_repo_sync.patch"
+            yield Call(write_file_effect, diff_file, cross_diff)
+            
+            # Apply the cross-repo patch
+            apply_result = yield Call(run_command_effect, 
+                f'git apply --reject --ignore-whitespace "{diff_file}"', capture_output=False)
+            
+            # Clean up temp file
+            if diff_file.exists():
+                diff_file.unlink()
+            
+            if apply_result and apply_result.returncode != 0:
+                yield Log("warning", "Some patch chunks may have failed - manual review may be needed")
+        
+        # Stage all changes in shadow worktree
+        yield Call(run_command_effect, "git add -A", capture_output=False)
+        
+        # Commit the synchronization
+        commit_msg = f"Sync with main repo state (session {state.session_id})"
+        yield Call(run_command_effect, f'git commit --allow-empty -m "{commit_msg}"', capture_output=False)
+        yield Log("info", "Shadow worktree synchronized with main repo")
+        
+    finally:
+        # Clean up archive directory
+        yield Call(run_command_effect, f'rm -rf "{archive_dir}"', capture_output=False)
+        # Return to original directory
+        yield Call(change_directory_effect, state.git_root)
+        yield Complete("Shadow worktree is ready for this session")
 
-
-def save_session_info_saga():
-    """Save the current session info for future reuse"""
-    state = yield Select()
-    
-    session_info = {
-        "session_id": state.session_id,
-        "commit": state.current_commit,
-        "timestamp": os.environ.get("CLAUDE_SESSION_TIMESTAMP", "")
-    }
-    
-    # Write session info to last_session.json
-    success = yield Call(write_file_effect, state.last_session_file, json.dumps(session_info, indent=2))
-    if success:
-        yield Log("debug", f"Saved session info to {state.last_session_file}")
-    else:
-        yield Put({
-            "success": False,
-            "error_message": "ERROR: Failed to save session info",
-            "continue_": False,
-            "suppressOutput": False,
-            "systemMessage": "ERROR: Failed to save session info",
-            "stopReason": "Failed to save session info"
-        })
-        yield Finish("Failed to save session info")
-
-
-def finish_saga():
-    """Prepare the final success response"""
-    state = yield Select()
-    
-    yield Put({
-        "continue_": True,
-        "suppressOutput": False,
-        "systemMessage": f"Shadow worktree initialized for session {state.session_id}",
-        "metadata": {
-            "session_id": state.session_id,
-            "shadow_dir": str(state.shadow_dir)
-        }
-    })
-
-    yield Finish("Shadow worktree initialized")
-
-
-def initialize_state_saga():
-    """Initialize the saga state from parsed input"""
-    state = yield Select()
-    
-    # Initialize git-specific state fields (session_id already set from parse_json_saga)
+def main_saga():
+    """Main saga that handles complete shadow worktree initialization"""
+    # Input validation and parsing
+    yield from validate_input_saga()
+    # Initialize state with hook input json.
+    yield from parse_json_saga()
+    # Initialize state with fields required by our sagas
     yield Put({
         "git_root": None,
         "claude_git_dir": None,
         "shadow_dir": None,
         "initial_state_file": None
     })
-
-
-def root_saga():
-    """Root saga that composes all sub-sagas"""
-    yield from pycharm_debug_saga()
-    yield from validate_session_saga()
-    yield from check_git_repository_saga()
-    yield from validate_working_directory_saga()
-    yield from get_current_commit_saga()
-    yield from setup_paths_saga()
-    yield from check_for_session_reuse_saga()
-    yield from check_existing_worktree_saga()
-    yield from update_gitignore_saga()
-    yield from initialize_git_saga()
-    yield from create_directories_saga()
-    yield from capture_initial_state_saga()
-    yield from create_worktree_saga()
-    yield from apply_initial_state_saga()
-    yield from save_session_info_saga()
-    yield from finish_saga()
-
-
-def main_saga():
-    """Main saga that handles input validation and initialization"""
-    yield from validate_input_saga()
-    yield from parse_json_saga()
-    yield from initialize_state_saga()
-    yield from root_saga()
-
-
-# ============================================================================
-# Main Entry Point
-# ============================================================================
+    
+    # Complete shadow worktree setup - consolidated 4-step process
+    yield from pycharm_debug_saga()               # Debug setup if needed
+    yield from setup_and_validate_saga()          # Step 1: Setup & validation
+    yield from ensure_shadow_worktree_saga()      # Step 2: Ensure shadow worktree exists
+    yield from synchronize_main_to_shadow_saga()  # Step 3: Sync main → shadow  
 
 def main():
     """Main entry point - pure orchestration"""
     # Create runtime with empty initial state object
     runtime = SagaRuntime(InitSagaState())
-    
-    # Run the main saga
+    # Run the saga
     final_state = runtime.run(main_saga())
-    
     # Output the final state as JSON, CC uses hook stdout to decide its next step.
-    # Note: different hooks expect stdout to contain different fields
     print(json.dumps(final_state.to_json()))
-    
     # Exit with appropriate code
     if final_state.continue_:
         sys.exit(0)
