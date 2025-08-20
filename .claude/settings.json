@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "DEBUG_PYCHARM=1 uv run /Users/iain/Desktop/Projects/sporran/.claude/hooks/init.py"
+            "command": "DEBUG_PYCHARM=1 uv run /Users/iain/Desktop/Projects/sporran/.claude/hooks/claude-git.py"
           }
         ]
       }
