@@ -26,7 +26,7 @@ spec.loader.exec_module(claude_saga)
 
 from claude_saga import (
     BaseSagaState, SagaRuntime,
-    Call, Put, Select, Log, Cancel,
+    Call, Put, Select, Log, Finish,
     run_command_effect, write_file_effect, 
     change_directory_effect, create_directory_effect,
     log_debug, connect_pycharm_debugger_effect,
@@ -36,12 +36,14 @@ from claude_saga import (
 @dataclass
 class InitSagaState(BaseSagaState):
     """State object specific to init hook"""
-    # Git-related state
-    session_id: Optional[str] = None
+    # Git-related state (session_id is already in BaseSagaState)
     git_root: Optional[str] = None
     claude_git_dir: Optional[Path] = None
     shadow_dir: Optional[Path] = None
     initial_state_file: Optional[Path] = None
+    last_session_file: Optional[Path] = None
+    last_session_data: Optional[dict] = None
+    current_commit: Optional[str] = None
 
 
 def pycharm_debug_saga():
@@ -59,8 +61,11 @@ def pycharm_debug_saga():
     if not connected:
         yield Log("error", "Failed to connect to PyCharm debugger")
         yield Log("error", "Check that pydevd-pycharm is installed and debugger is waiting")
-        print("HEEEEEEE")
-        yield Cancel("Failed to connect to PyCharm debugger")
+        yield Put({
+            "continue_": False,
+            "stopReason": "Failed to connect to PyCharm debugger"
+        })
+        yield Finish("Failed to connect to PyCharm debugger")
     else:
         yield Log("info", "Successfully connected to PyCharm debugger")
 
@@ -68,22 +73,18 @@ def pycharm_debug_saga():
 def validate_session_saga():
     """Validate that session_id exists in input"""
     state = yield Select()
-    session_id = state.input_data.get("session_id")
     
-    if not session_id:
-        yield Log("error", "No session_id found in JSON input")
+    if not state.session_id:
+        yield Log("error", "No session_id found")
         yield Put({
             "success": False,
-            "error_message": "ERROR: No session_id found in input",
-            "response": {
-                "continue": False,
-                "suppressOutput": False,
-                "systemMessage": "ERROR: No session_id found in input"
-            }
+            "error_message": "ERROR: No session_id",
+            "continue_": False,
+            "suppressOutput": False,
+            "systemMessage": "ERROR: No session_id",
+            "stopReason": "No session_id"
         })
-        yield Cancel("No session_id found")
-    
-    yield Put({"session_id": session_id})
+        yield Finish("No session_id found")
 
 
 def check_git_repository_saga():
@@ -95,13 +96,12 @@ def check_git_repository_saga():
         yield Put({
             "success": False,
             "error_message": "ERROR: Not a git repository",
-            "response": {
-                "continue": False,
-                "suppressOutput": False,
-                "systemMessage": "ERROR: Not a git repository"
-            }
+            "continue_": False,
+            "suppressOutput": False,
+            "systemMessage": "ERROR: Not a git repository",
+            "stopReason": "Not a git repository"
         })
-        yield Cancel("Not a git repository")
+        yield Finish("Not a git repository")
     
     git_root = result.stdout.strip()
     yield Put({"git_root": git_root})
@@ -111,18 +111,17 @@ def validate_working_directory_saga():
     """Ensure Claude is running from the repo root"""
     state = yield Select()
     
-    if state.git_root != state.input_data.get("cwd"):
+    if state.git_root != state.cwd:
         yield Log("error", "ERROR: Run claude from the repo's root")
         yield Put({
             "success": False,
             "error_message": "ERROR: Not running from the repo's root",
-            "response": {
-                "continue": False,
-                "suppressOutput": False,
-                "systemMessage": "ERROR: Not running from the repo's root"
-            }
+            "continue_": False,
+            "suppressOutput": False,
+            "systemMessage": "ERROR: Not running from the repo's root",
+            "stopReason": "Not running from the repo's root"
         })
-        yield Cancel("Not running from repo root")
+        yield Finish("Not running from repo root")
     
     # Change to repo root
     yield Call(change_directory_effect, state.git_root)
@@ -135,31 +134,97 @@ def setup_paths_saga():
     claude_git_dir = Path(state.git_root) / ".claude" / "git"
     shadow_dir = claude_git_dir / "sessions" / state.session_id / f"session-{state.session_id}-worktree"
     initial_state_file = claude_git_dir / "sessions" / state.session_id / f"session-{state.session_id}-initial.patch"
+    last_session_file = claude_git_dir / "last_session.json"
     
     yield Put({
         "claude_git_dir": claude_git_dir,
         "shadow_dir": shadow_dir,
-        "initial_state_file": initial_state_file
+        "initial_state_file": initial_state_file,
+        "last_session_file": last_session_file
     })
 
 
+def get_current_commit_saga():
+    """Get the current HEAD commit hash"""
+    result = yield Call(run_command_effect, "git rev-parse HEAD")
+    if result and result.returncode == 0:
+        current_commit = result.stdout.strip()
+        yield Put({"current_commit": current_commit})
+    else:
+        yield Log("error", "Failed to get current commit")
+        yield Put({
+            "continue_": False,
+            "stopReason": "Failed to get current commit"
+        })
+        yield Finish("Failed to get current commit")
+
+
+def check_for_session_reuse_saga():
+    """Check if we can reuse a previous session's worktree"""
+    state = yield Select()
+    
+    # Check if last_session.json exists
+    if not state.last_session_file.exists():
+        yield Log("debug", "No previous session found")
+        return
+    
+    # Read last session data
+    try:
+        with open(state.last_session_file, 'r') as f:
+            last_session_data = json.load(f)
+            yield Put({"last_session_data": last_session_data})
+    except Exception as e:
+        yield Log("error", f"Failed to read last session file: {e}")
+        return
+    
+    # Check if the repo has changed since last session
+    last_commit = last_session_data.get("commit")
+    last_session_id = last_session_data.get("session_id")
+    
+    if last_commit == state.current_commit:
+        # No changes, check if the last session's worktree still exists
+        last_shadow_dir = state.claude_git_dir / "sessions" / last_session_id / f"session-{last_session_id}-worktree"
+        worktree_list = yield Call(run_command_effect, "git worktree list")
+        
+        if worktree_list and str(last_shadow_dir) in worktree_list.stdout:
+            yield Log("info", f"Reusing existing session {last_session_id} (no repo changes detected)")
+            # Update paths to use the existing session
+            yield Put({
+                "session_id": last_session_id,
+                "shadow_dir": last_shadow_dir,
+                "initial_state_file": state.claude_git_dir / "sessions" / last_session_id / f"session-{last_session_id}-initial.patch",
+                "systemMessage": f"Reusing existing session {last_session_id} (no repo changes)"
+            })
+            # Add session info to metadata and finish
+            yield Put({
+                "metadata": {
+                    "session_id": last_session_id,
+                    "shadow_dir": str(last_shadow_dir)
+                }
+            })
+            yield Finish(f"Reusing existing session {last_session_id}")
+    else:
+        yield Log("info", f"Repo has changed since last session (was {last_commit[:8]}, now {state.current_commit[:8]})")
+
+
 def check_existing_worktree_saga():
-    """Check if shadow worktree already exists"""
+    """Check if shadow worktree already exists for current session"""
     state = yield Select()
     worktree_list = yield Call(run_command_effect, "git worktree list")
     
     if worktree_list and str(state.shadow_dir) in worktree_list.stdout:
         yield Log("info", f"Shadow worktree already exists for session {state.session_id}")
         yield Put({
-            "response": {
-                "continue": True,
-                "suppressOutput": False,
-                "systemMessage": f"Shadow worktree already exists for session {state.session_id}",
+            "systemMessage": f"Shadow worktree already exists for session {state.session_id}"
+        })
+        # Add session info to metadata and finish
+        yield Put({
+            "metadata": {
                 "session_id": state.session_id,
                 "shadow_dir": str(state.shadow_dir)
             }
         })
-        yield Cancel("Worktree already exists")
+        yield Finish(f"Shadow worktree already exists for session {state.session_id}")
 
 
 def update_gitignore_saga():
@@ -167,9 +232,9 @@ def update_gitignore_saga():
     state = yield Select()
     
     # Check if .claude/git/ already exists in .gitignore
-    check_result = yield Call(run_command_effect, r"grep -q '^\\.claude/git' .gitignore", cwd=state.git_root)
+    check_result = yield Call(run_command_effect, r"grep -q '.claude/git' .gitignore", cwd=state.git_root)
     
-    if check_result and check_result.returncode == 0:
+    if check_result.returncode == 0:
         yield Log("info", ".claude/git/ already exists in .gitignore")
         return
     
@@ -177,17 +242,15 @@ def update_gitignore_saga():
     result = yield Call(run_command_effect, "echo '.claude/git/' >> .gitignore", cwd=state.git_root)
     
     if not result or result.returncode != 0:
-        yield Log("error", "Failed to add .claude/git/ to .gitignore")
         yield Put({
             "success": False,
             "error_message": "ERROR: Failed to update .gitignore",
-            "response": {
-                "continue": False,
-                "suppressOutput": False,
-                "systemMessage": "ERROR: Failed to update .gitignore"
-            }
+            "continue_": False,
+            "suppressOutput": False,
+            "systemMessage": "ERROR: Failed to update .gitignore",
+            "stopReason": "Failed to update .gitignore"
         })
-        yield Cancel("Failed to update .gitignore")
+        yield Finish("Failed to update .gitignore")
     
     yield Log("info", "Added .claude/git/ to .gitignore")
 
@@ -225,17 +288,15 @@ def create_worktree_saga():
     worktree_result = yield Call(run_command_effect, f'git worktree add -d "{state.shadow_dir}" HEAD')
     
     if not worktree_result or worktree_result.returncode != 0:
-        yield Log("error", "Failed to create shadow worktree")
         yield Put({
             "success": False,
             "error_message": "ERROR: Failed to create shadow worktree",
-            "response": {
-                "continue": False,
-                "suppressOutput": False,
-                "systemMessage": "ERROR: Failed to create shadow worktree"
-            }
+            "continue_": False,
+            "suppressOutput": False,
+            "systemMessage": "ERROR: Failed to create shadow worktree",
+            "stopReason": "Failed to create shadow worktree"
         })
-        yield Cancel("Failed to create shadow worktree")
+        yield Finish("Failed to create shadow worktree")
 
 
 def apply_initial_state_saga():
@@ -257,32 +318,55 @@ def apply_initial_state_saga():
     yield Call(change_directory_effect, state.git_root)
 
 
-def prepare_success_response_saga():
+def save_session_info_saga():
+    """Save the current session info for future reuse"""
+    state = yield Select()
+    
+    session_info = {
+        "session_id": state.session_id,
+        "commit": state.current_commit,
+        "timestamp": os.environ.get("CLAUDE_SESSION_TIMESTAMP", "")
+    }
+    
+    # Write session info to last_session.json
+    success = yield Call(write_file_effect, state.last_session_file, json.dumps(session_info, indent=2))
+    if success:
+        yield Log("debug", f"Saved session info to {state.last_session_file}")
+    else:
+        yield Put({
+            "success": False,
+            "error_message": "ERROR: Failed to save session info",
+            "continue_": False,
+            "suppressOutput": False,
+            "systemMessage": "ERROR: Failed to save session info",
+            "stopReason": "Failed to save session info"
+        })
+        yield Finish("Failed to save session info")
+
+
+def finish_saga():
     """Prepare the final success response"""
     state = yield Select()
     
     yield Put({
-        "response": {
-            "continue": True,
-            "suppressOutput": False,
-            "systemMessage": f"Shadow worktree initialized for session {state.session_id}",
+        "continue_": True,
+        "suppressOutput": False,
+        "systemMessage": f"Shadow worktree initialized for session {state.session_id}",
+        "metadata": {
             "session_id": state.session_id,
             "shadow_dir": str(state.shadow_dir)
         }
     })
+
+    yield Finish("Shadow worktree initialized")
 
 
 def initialize_state_saga():
     """Initialize the saga state from parsed input"""
     state = yield Select()
     
-    # Extract session_id from input data
-    input_data = state.input_data
-    session_id = input_data.get("session_id")
-    
-    # Initialize the saga state fields
+    # Initialize git-specific state fields (session_id already set from parse_json_saga)
     yield Put({
-        "session_id": session_id,
         "git_root": None,
         "claude_git_dir": None,
         "shadow_dir": None,
@@ -296,7 +380,9 @@ def root_saga():
     yield from validate_session_saga()
     yield from check_git_repository_saga()
     yield from validate_working_directory_saga()
+    yield from get_current_commit_saga()
     yield from setup_paths_saga()
+    yield from check_for_session_reuse_saga()
     yield from check_existing_worktree_saga()
     yield from update_gitignore_saga()
     yield from initialize_git_saga()
@@ -304,7 +390,8 @@ def root_saga():
     yield from capture_initial_state_saga()
     yield from create_worktree_saga()
     yield from apply_initial_state_saga()
-    yield from prepare_success_response_saga()
+    yield from save_session_info_saga()
+    yield from finish_saga()
 
 
 def main_saga():
@@ -320,7 +407,6 @@ def main_saga():
 # ============================================================================
 
 def main():
-    print("HEEEERE")
     """Main entry point - pure orchestration"""
     # Create runtime with empty initial state object
     runtime = SagaRuntime(InitSagaState())
@@ -328,20 +414,12 @@ def main():
     # Run the main saga
     final_state = runtime.run(main_saga())
     
-    # Handle output based on final state
-    if hasattr(final_state, 'error'):
-        print(f"Error: {final_state.error}", file=sys.stderr)
-        if hasattr(final_state, 'usage'):
-            print(final_state.usage, file=sys.stderr)
-        sys.exit(1)
-    elif hasattr(final_state, 'response'):
-        print(json.dumps(final_state.response))
-    else:
-        print("Error: Unexpected state", file=sys.stderr)
-        sys.exit(1)
+    # Output the final state as JSON, CC uses hook stdout to decide its next step.
+    # Note: different hooks expect stdout to contain different fields
+    print(json.dumps(final_state.to_json()))
     
     # Exit with appropriate code
-    if final_state.response.get("continue", False):
+    if final_state.continue_:
         sys.exit(0)
     else:
         sys.exit(1)

@@ -28,7 +28,7 @@ class EffectType(Enum):
     PUT = auto()       # Update state
     SELECT = auto()    # Select from state
     LOG = auto()       # Log a message
-    CANCEL = auto()    # Cancel the saga
+    FINISH = auto()    # Finish the saga and output state
 
 
 @dataclass
@@ -72,10 +72,10 @@ class Log(Effect):
 
 
 @dataclass
-class Cancel(Effect):
-    """Effect for canceling the saga with an error"""
-    def __init__(self, error: str):
-        super().__init__(EffectType.CANCEL, error)
+class Finish(Effect):
+    """Effect for finishing the saga and outputting the current state"""
+    def __init__(self, message: Optional[str] = None):
+        super().__init__(EffectType.FINISH, message)
 
 
 # ============================================================================
@@ -85,18 +85,45 @@ class Cancel(Effect):
 @dataclass
 class BaseSagaState:
     """Base state object that can be extended by specific hooks"""
-    # Input data
-    input_data: Optional[dict] = None
+    # Common input fields from hook
+    session_id: Optional[str] = None
+    transcript_path: Optional[str] = None
+    cwd: Optional[str] = None
+    hook_event_name: Optional[str] = None
     
-    # Control flow
+    # Hook response fields (output)
+    continue_: bool = True  # Whether Claude should continue after hook execution
+    stopReason: Optional[str] = None  # Message shown when continue is false
+    suppressOutput: bool = False  # Hide stdout from transcript mode
+    systemMessage: Optional[str] = None  # Optional message to display
+    
+    # Internal state management
     success: bool = True
     error_message: Optional[str] = None
     
-    # Response
-    response: dict = field(default_factory=dict)
+    # Raw input data for additional fields
+    input_data: Optional[dict] = None
     
     # Additional metadata
     metadata: dict = field(default_factory=dict)
+    
+    def to_json(self) -> dict:
+        """Convert state to JSON response for hook output"""
+        response = {
+            "continue": self.continue_,
+            "suppressOutput": self.suppressOutput
+        }
+        
+        if self.stopReason:
+            response["stopReason"] = self.stopReason
+            
+        if self.systemMessage:
+            response["systemMessage"] = self.systemMessage
+            
+        # Add any additional fields from metadata
+        response.update(self.metadata)
+        
+        return response
 
 
 # ============================================================================
@@ -194,6 +221,7 @@ class SagaRuntime:
     
     def run(self, saga: Generator) -> BaseSagaState:
         """Run a saga to completion"""
+        saga_name = saga.gi_code.co_name if hasattr(saga, 'gi_code') else 'unknown'
         try:
             effect = None
             while not self.cancelled:
@@ -203,7 +231,7 @@ class SagaRuntime:
                 except StopIteration:
                     break
         except Exception as e:
-            log_error(f"Saga runtime error: {e}")
+            log_error(f"Saga runtime error in '{saga_name}': {e}")
             self.state.success = False
             self.state.error_message = str(e)
         
@@ -223,8 +251,8 @@ class SagaRuntime:
                 return self._handle_select(effect)
             case EffectType.LOG:
                 return self._handle_log(effect)
-            case EffectType.CANCEL:
-                return self._handle_cancel(effect)
+            case EffectType.FINISH:
+                return self._handle_finish(effect)
             case _:
                 return None
     
@@ -260,20 +288,26 @@ class SagaRuntime:
             case "error":
                 log_error(effect.message)
     
-    def _handle_cancel(self, effect: Cancel) -> None:
-        """Handle a CANCEL effect"""
-        self.cancelled = True
-        self.cancel_reason = effect.payload
+    def _handle_finish(self, effect: Finish) -> None:
+        """Handle a FINISH effect - end saga and output state"""
+        self.cancelled = True  # Stop the saga execution
         
-        # Log the cancellation reason
-        log_error(f"Saga cancelled: {effect.payload}")
-        
-        # Update state to reflect the cancellation
-        self.state.success = False
-        self.state.error_message = effect.payload
-        
-        # Exit immediately with non-zero status
-        sys.exit(1)
+        # If a message was provided, log it
+        if effect.payload:
+            if self.state.continue_:
+                log_info(f"Saga finished: {effect.payload}")
+            else:
+                log_error(f"Saga finished: {effect.payload}")
+
+        # The state already has all the necessary fields set
+        # Just output it and exit
+        print(json.dumps(self.state.to_json()))
+
+        # Exit with appropriate code based on continue_ field
+        if self.state.continue_:
+            sys.exit(0)
+        else:
+            sys.exit(1)
 
 
 # ============================================================================
@@ -284,17 +318,39 @@ def validate_input_saga():
     """Validate that input is provided via stdin"""
     if sys.stdin.isatty():
         yield Put({
-            "error": "No input provided. This script expects JSON input via stdin.",
-            "usage": "echo '{\"session_id\": \"test\", \"cwd\": \"/path\"}' | uv run <script>.py"
+            "continue_": False,
+            "stopReason": "No input provided. This script expects JSON input via stdin.",
+            "error_message": "No input provided"
         })
-        yield Cancel("No input provided")
+        yield Finish("No input provided")
 
 
 def parse_json_saga():
-    """Parse JSON input from stdin"""
+    """Parse JSON input from stdin and populate state fields"""
     try:
         input_data = json.load(sys.stdin)
+        
+        # Store raw input
         yield Put({"input_data": input_data})
+        
+        # Extract common hook fields into state
+        update = {}
+        if "session_id" in input_data:
+            update["session_id"] = input_data["session_id"]
+        if "transcript_path" in input_data:
+            update["transcript_path"] = input_data["transcript_path"]
+        if "cwd" in input_data:
+            update["cwd"] = input_data["cwd"]
+        if "hook_event_name" in input_data:
+            update["hook_event_name"] = input_data["hook_event_name"]
+            
+        if update:
+            yield Put(update)
+            
     except json.JSONDecodeError as e:
-        yield Put({"error": f"Invalid JSON input: {e}"})
-        yield Cancel(f"Invalid JSON input: {e}")
+        yield Put({
+            "continue_": False,
+            "stopReason": f"Invalid JSON input: {e}",
+            "error_message": f"Invalid JSON input: {e}"
+        })
+        yield Finish(f"Invalid JSON input: {e}")
