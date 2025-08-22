@@ -129,6 +129,39 @@ def synchronize_main_to_shadow_saga():
         if archive_result and archive_result.returncode != 0:
             yield Stop("Failed to create git archive")
         
+        # Capture uncommitted changes from main worktree
+        uncommitted_patch_file = state.claude_git_dir / "uncommitted_changes.patch"
+        
+        # Get unstaged changes
+        unstaged_diff = yield Call(run_command_effect, "git diff HEAD")
+        
+        # Get staged changes
+        staged_diff = yield Call(run_command_effect, "git diff --cached HEAD")
+        
+        # Combine patches if there are any changes
+        combined_patch = ""
+        if unstaged_diff and unstaged_diff.stdout:
+            combined_patch += unstaged_diff.stdout
+        if staged_diff and staged_diff.stdout:
+            combined_patch += staged_diff.stdout
+        
+        # Apply uncommitted changes to the archive if any exist
+        if combined_patch:
+            yield Log("info", "Found uncommitted changes in main worktree, applying to archive")
+            # Write combined patch to file
+            yield Call(write_file_effect, uncommitted_patch_file, combined_patch)
+            
+            # Apply patch to archive directory
+            apply_to_archive = yield Call(run_command_effect,
+                f'cd "{archive_dir}" && git apply --reject --ignore-whitespace "{uncommitted_patch_file}"')
+            
+            if apply_to_archive and apply_to_archive.returncode != 0:
+                yield Log("warning", "Some uncommitted changes may have failed to apply to archive")
+            
+            # Clean up patch file
+            if uncommitted_patch_file.exists():
+                uncommitted_patch_file.unlink()
+        
         # Generate diff between clean archive and shadow worktree
         cross_diff_result = yield Call(run_command_effect, 
             f'git diff --no-index "{archive_dir}" "{state.shadow_dir}"')

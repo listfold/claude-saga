@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 # Import the saga framework
 import importlib.util
+
 spec = importlib.util.spec_from_file_location("claude_saga", Path(__file__).parent / "claude-saga.py")
 claude_saga = importlib.util.module_from_spec(spec)
 sys.modules["claude_saga"] = claude_saga
@@ -27,11 +28,12 @@ spec.loader.exec_module(claude_saga)
 from claude_saga import (
     BaseSagaState, SagaRuntime,
     Call, Put, Select, Log, Stop, Complete,
-    run_command_effect, write_file_effect, 
+    run_command_effect, write_file_effect,
     change_directory_effect, create_directory_effect,
     log_debug, connect_pycharm_debugger_effect,
     validate_input_saga, parse_json_saga
 )
+
 
 @dataclass
 class InitSagaState(BaseSagaState):
@@ -41,6 +43,7 @@ class InitSagaState(BaseSagaState):
     claude_git_dir: Optional[Path] = None
     shadow_dir: Optional[Path] = None
 
+
 def pycharm_debug_saga():
     """Connect to PyCharm debugger if DEBUG_PYCHARM env var is set"""
     if os.environ.get("DEBUG_PYCHARM") != "1":
@@ -49,20 +52,22 @@ def pycharm_debug_saga():
     if not connected:
         yield Stop("Failed to connect to PyCharm debugger")
 
+
 def setup_and_validate_saga():
     state = yield Select()
-    
+
     # Check git repository and get root
     result = yield Call(run_command_effect, "git rev-parse --show-toplevel")
     if not result or result.returncode != 0:
         yield Stop("Not a git repository, run git init in project root to use this tool.")
-    
+
     git_root = result.stdout.strip()
-    
+
     # Ensure CC is running from the repo root
     if git_root != state.cwd:
-        yield Stop("Claude Code is not running from the repo's root, run claude code from the repo root to use this tool.")
-    
+        yield Stop(
+            "Claude Code is not running from the repo's root, run claude code from the repo root to use this tool.")
+
     # Change hook's execution context to repo root.
     yield Call(change_directory_effect, git_root)
 
@@ -75,17 +80,19 @@ def setup_and_validate_saga():
     yield Call(create_directory_effect, shadow_dir)
 
     # Ensure claude_git_dir is in .gitignore, add it if not
-    check_result = yield Call(run_command_effect, f"grep -q '{claude_git_dir.relative_to(git_root)}' .gitignore", cwd=git_root)
+    check_result = yield Call(run_command_effect, f"grep -q '{claude_git_dir.relative_to(git_root)}' .gitignore",
+                              cwd=git_root)
     if check_result.returncode != 0:
         yield Call(run_command_effect, f"echo '{claude_git_dir.relative_to(git_root)}/' >> .gitignore", cwd=git_root)
         yield Log("info", f"Added {claude_git_dir.relative_to(git_root)}/ to .gitignore")
-    
+
     # Update state with all collected info
     yield Put({
         "git_root": git_root,
         "claude_git_dir": claude_git_dir,
         "shadow_dir": shadow_dir,
     })
+
 
 def ensure_shadow_worktree_saga():
     """Ensure the shadow worktree exists"""
@@ -101,40 +108,73 @@ def ensure_shadow_worktree_saga():
     worktree_result = yield Call(run_command_effect, f'git worktree add -d "{state.shadow_dir}" HEAD')
     if not worktree_result or worktree_result.returncode != 0:
         yield Stop("Failed to create shadow worktree")
-    
+
     yield Log("info", f"Created shadow worktree at {state.shadow_dir}")
 
 
 def synchronize_main_to_shadow_saga():
     """ensure shadow worktree matches main repo state using git archive diff"""
     state = yield Select()
-    
+
     # Use .claude/git directory for archive (already in .gitignore)
     archive_dir = state.claude_git_dir / "main-archive"
-    
+
     try:
         # Create clean archive of main repo (we create a temp git archive because it respects .gitignore, useful snapshot of the main repo)
         yield Call(change_directory_effect, state.git_root)
-        
+
         # Clean up any previous archive
         yield Call(run_command_effect, f'rm -rf "{archive_dir}"', capture_output=False)
-        
+
         # Create archive directory
         yield Call(create_directory_effect, archive_dir)
-        
+
         # Extract git archive to archive directory
-        archive_result = yield Call(run_command_effect, 
-            f'git archive HEAD | tar -x -C "{archive_dir}"')
-        
+        archive_result = yield Call(run_command_effect,
+                                    f'git archive HEAD | tar -x -C "{archive_dir}"')
+
         if archive_result and archive_result.returncode != 0:
             yield Stop("Failed to create git archive")
-        
+
+        # Capture uncommitted changes from main worktree
+        uncommitted_patch_file = state.claude_git_dir / "uncommitted_changes.patch"
+
+        # Get unstaged changes
+        unstaged_diff = yield Call(run_command_effect, "git diff HEAD")
+
+        # Get staged changes
+        staged_diff = yield Call(run_command_effect, "git diff --cached HEAD")
+
+        # Combine patches if there are any changes
+        combined_patch = ""
+        if unstaged_diff and unstaged_diff.stdout:
+            combined_patch += unstaged_diff.stdout
+        if staged_diff and staged_diff.stdout:
+            combined_patch += staged_diff.stdout
+
+        # Apply uncommitted changes to the archive if any exist
+        if combined_patch:
+            yield Log("info", "Found uncommitted changes in main worktree, applying to archive")
+            # Write combined patch to file
+            yield Call(write_file_effect, uncommitted_patch_file, combined_patch)
+
+            # Apply patch to archive directory
+            apply_to_archive = yield Call(run_command_effect,
+                                          f'cd "{archive_dir}" && git apply --reject --ignore-whitespace "{uncommitted_patch_file}"')
+
+            if apply_to_archive and apply_to_archive.returncode != 0:
+                yield Log("warning", "Some uncommitted changes may have failed to apply to archive")
+
+            # Clean up patch file
+            if uncommitted_patch_file.exists():
+                uncommitted_patch_file.unlink()
+
         # Generate diff between clean archive and shadow worktree
-        cross_diff_result = yield Call(run_command_effect, 
-            f'git diff --no-index "{archive_dir}" "{state.shadow_dir}"')
-        
+        cross_diff_result = yield Call(run_command_effect,
+                                       f'git diff --no-index "{archive_dir}" "{state.shadow_dir}"')
+
         cross_diff = ""
-        
+
         # git diff --no-index returns exit code 1 when differences exist, 0 when identical
         if cross_diff_result and cross_diff_result.returncode == 0:
             yield Log("info", "Main repo and shadow worktree are already synchronized")
@@ -146,45 +186,46 @@ def synchronize_main_to_shadow_saga():
         else:
             # Error occurred
             yield Stop("Failed to generate cross-repo diff")
-        
+
         # Change to shadow worktree directory
         yield Call(change_directory_effect, str(state.shadow_dir))
-        
+
         # Reset shadow worktree to clean state
         yield Call(run_command_effect, "git reset --hard HEAD", capture_output=False)
         yield Call(run_command_effect, "git clean -fd", capture_output=False)
-        
+
         # Apply cross-repo changes if differences exist
         if cross_diff:
             # Write cross-repo diff to temporary file
             diff_file = state.shadow_dir / "temp_cross_repo_sync.patch"
             yield Call(write_file_effect, diff_file, cross_diff)
-            
+
             # Apply the cross-repo patch
-            apply_result = yield Call(run_command_effect, 
-                f'git apply --reject --ignore-whitespace "{diff_file}"', capture_output=False)
-            
+            apply_result = yield Call(run_command_effect,
+                                      f'git apply --reject --ignore-whitespace "{diff_file}"', capture_output=False)
+
             # Clean up temp file
             if diff_file.exists():
                 diff_file.unlink()
-            
+
             if apply_result and apply_result.returncode != 0:
                 yield Log("warning", "Some patch chunks may have failed - manual review may be needed")
-        
+
         # Stage all changes in shadow worktree
         yield Call(run_command_effect, "git add -A", capture_output=False)
-        
+
         # Commit the synchronization
         commit_msg = f"Sync with main repo state (session {state.session_id})"
         yield Call(run_command_effect, f'git commit --allow-empty -m "{commit_msg}"', capture_output=False)
         yield Log("info", "Shadow worktree synchronized with main repo")
-        
+
     finally:
         # Clean up archive directory
         yield Call(run_command_effect, f'rm -rf "{archive_dir}"', capture_output=False)
         # Return to original directory
         yield Call(change_directory_effect, state.git_root)
         yield Complete("Shadow worktree is ready for this session")
+
 
 def main_saga():
     """Main saga that handles complete shadow worktree initialization"""
@@ -199,12 +240,13 @@ def main_saga():
         "shadow_dir": None,
         "initial_state_file": None
     })
-    
+
     # Complete shadow worktree setup - consolidated 4-step process
-    yield from pycharm_debug_saga()               # Debug setup if needed
-    yield from setup_and_validate_saga()          # Step 1: Setup & validation
-    yield from ensure_shadow_worktree_saga()      # Step 2: Ensure shadow worktree exists
+    yield from pycharm_debug_saga()  # Debug setup if needed
+    yield from setup_and_validate_saga()  # Step 1: Setup & validation
+    yield from ensure_shadow_worktree_saga()  # Step 2: Ensure shadow worktree exists
     yield from synchronize_main_to_shadow_saga()  # Step 3: Sync main → shadow  
+
 
 def main():
     """Main entry point - pure orchestration"""
