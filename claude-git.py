@@ -136,9 +136,7 @@ def synchronize_main_to_shadow_saga():
         if archive_result and archive_result.returncode != 0:
             yield Stop("Failed to create git archive")
 
-        # Capture uncommitted changes from main worktree
-        uncommitted_patch_file = state.claude_git_dir / "uncommitted_changes.patch"
-
+        # Capture uncommitted changes from main worktree BEFORE syncing
         # Get unstaged changes
         unstaged_diff = yield Call(run_command_effect, "git diff HEAD")
 
@@ -152,23 +150,6 @@ def synchronize_main_to_shadow_saga():
         if staged_diff and staged_diff.stdout:
             combined_patch += staged_diff.stdout
 
-        # Apply uncommitted changes to the archive if any exist
-        if combined_patch:
-            yield Log("info", "Found uncommitted changes in main worktree, applying to archive")
-            # Write combined patch to file
-            yield Call(write_file_effect, uncommitted_patch_file, combined_patch)
-
-            # Apply patch to archive directory
-            apply_to_archive = yield Call(run_command_effect,
-                                          f'cd "{archive_dir}" && git apply --reject --ignore-whitespace "{uncommitted_patch_file}"')
-
-            if apply_to_archive and apply_to_archive.returncode != 0:
-                yield Log("warning", "Some uncommitted changes may have failed to apply to archive")
-
-            # Clean up patch file
-            if uncommitted_patch_file.exists():
-                uncommitted_patch_file.unlink()
-
         # Generate diff between clean archive and shadow worktree
         cross_diff_result = yield Call(run_command_effect,
                                        f'git diff --no-index "{archive_dir}" "{state.shadow_dir}"')
@@ -178,7 +159,6 @@ def synchronize_main_to_shadow_saga():
         # git diff --no-index returns exit code 1 when differences exist, 0 when identical
         if cross_diff_result and cross_diff_result.returncode == 0:
             yield Log("info", "Main repo and shadow worktree are already synchronized")
-            return
         elif cross_diff_result and cross_diff_result.returncode == 1:
             # Differences found - need to synchronize
             cross_diff = cross_diff_result.stdout.strip()
@@ -211,13 +191,43 @@ def synchronize_main_to_shadow_saga():
             if apply_result and apply_result.returncode != 0:
                 yield Log("warning", "Some patch chunks may have failed - manual review may be needed")
 
-        # Stage all changes in shadow worktree
-        yield Call(run_command_effect, "git add -A", capture_output=False)
+            # Stage all changes in shadow worktree
+            yield Call(run_command_effect, "git add -A", capture_output=False)
 
-        # Commit the synchronization
-        commit_msg = f"Sync with main repo state (session {state.session_id})"
-        yield Call(run_command_effect, f'git commit --allow-empty -m "{commit_msg}"', capture_output=False)
-        yield Log("info", "Shadow worktree synchronized with main repo")
+            # Commit the synchronization
+            commit_msg = f"Sync with main repo state (session {state.session_id})"
+            yield Call(run_command_effect, f'git commit --allow-empty -m "{commit_msg}"', capture_output=False)
+            yield Log("info", "Shadow worktree synchronized with main repo")
+
+        # Now apply uncommitted changes from main worktree as a separate commit
+        if combined_patch:
+            yield Log("info", "Applying uncommitted changes from main worktree as separate commit")
+
+            # Write combined patch to file
+            uncommitted_patch_file = state.claude_git_dir / "uncommitted_changes.patch"
+            yield Call(write_file_effect, uncommitted_patch_file, combined_patch)
+
+            # Apply patch to shadow worktree
+            apply_to_shadow = yield Call(run_command_effect,
+                                         f'git apply --reject --ignore-whitespace "{uncommitted_patch_file}"')
+
+            if apply_to_shadow and apply_to_shadow.returncode != 0:
+                yield Log("warning", "Some uncommitted changes may have failed to apply to shadow worktree")
+
+            # Clean up patch file
+            if uncommitted_patch_file.exists():
+                uncommitted_patch_file.unlink()
+
+            # Stage the uncommitted changes
+            yield Call(run_command_effect, "git add -A", capture_output=False)
+
+            # Commit the uncommitted changes with a clear message
+            uncommitted_commit_msg = f"Uncommitted changes from main worktree at sync time (session {state.session_id})"
+            commit_result = yield Call(run_command_effect,
+                                       f'git commit --allow-empty -m "{uncommitted_commit_msg}"', capture_output=False)
+
+            if commit_result and commit_result.returncode == 0:
+                yield Log("info", "Created separate commit for uncommitted changes")
 
     finally:
         # Clean up archive directory
@@ -245,7 +255,7 @@ def main_saga():
     yield from pycharm_debug_saga()  # Debug setup if needed
     yield from setup_and_validate_saga()  # Step 1: Setup & validation
     yield from ensure_shadow_worktree_saga()  # Step 2: Ensure shadow worktree exists
-    yield from synchronize_main_to_shadow_saga()  # Step 3: Sync main → shadow  
+    yield from synchronize_main_to_shadow_saga()  # Step 3: Sync main → shadow
 
 
 def main():
