@@ -12,6 +12,13 @@ license = {text = "MIT"}
 authors = [
     { name = "Iain", email = "" }
 ]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
 keywords = [
     "saga",
     "effects",
@@ -47,4 +54,9 @@ include = [
     "/tests",
     "/README.md",
     "/LICENSE",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0.0",
 ]
