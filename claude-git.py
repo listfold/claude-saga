@@ -76,8 +76,13 @@ def setup_and_validate_saga():
     shadow_dir = claude_git_dir / "shadow-worktree"  # Persistent shadow worktree
 
     # Create required directories
-    yield Call(create_directory_effect, claude_git_dir)
-    yield Call(create_directory_effect, shadow_dir)
+    claude_git_dir_result = yield Call(create_directory_effect, claude_git_dir)
+    if not claude_git_dir_result:
+        yield Stop(f"Failed to create Claude git directory: {claude_git_dir}")
+    
+    shadow_dir_result = yield Call(create_directory_effect, shadow_dir)
+    if not shadow_dir_result:
+        yield Stop(f"Failed to create shadow worktree directory: {shadow_dir}")
 
     # Ensure claude_git_dir is in .gitignore, add it if not
     check_result = yield Call(run_command_effect, f"grep -q '{claude_git_dir.relative_to(git_root)}' .gitignore",
@@ -127,7 +132,9 @@ def synchronize_main_to_shadow_saga():
         yield Call(run_command_effect, f'rm -rf "{archive_dir}"', capture_output=False)
 
         # Create archive directory
-        yield Call(create_directory_effect, archive_dir)
+        archive_dir_result = yield Call(create_directory_effect, archive_dir)
+        if not archive_dir_result:
+            yield Stop(f"Failed to create archive directory: {archive_dir}")
 
         # Extract git archive to archive directory
         archive_result = yield Call(run_command_effect,
