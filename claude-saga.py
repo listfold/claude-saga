@@ -5,7 +5,7 @@
 
 """
 Claude Saga Framework - A Redux Saga-like effect system for Python
-This module provides reusable saga infrastructure for hooks.
+This module provides reusable saga infrastructure for claude-code hooks.
 """
 
 import os
@@ -18,17 +18,13 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 
 
-# ============================================================================
-# Redux Saga-like Effect System
-# ============================================================================
-
 class EffectType(Enum):
     """Types of effects that can be yielded from sagas"""
-    CALL = auto()      # Call a function with side effects
-    PUT = auto()       # Update state
-    SELECT = auto()    # Select from state
-    LOG = auto()       # Log a message
-    STOP = auto()      # Stop the saga execution with error
+    CALL = auto()  # Call a function with side effects
+    PUT = auto()  # Update state
+    SELECT = auto()  # Select from state
+    LOG = auto()  # Log a message
+    STOP = auto()  # Stop the saga execution with error
     COMPLETE = auto()  # Stop the saga execution with success
 
 
@@ -42,6 +38,7 @@ class Effect:
 @dataclass
 class Call(Effect):
     """Effect for calling functions with side effects"""
+
     def __init__(self, fn: Callable, *args, **kwargs):
         super().__init__(EffectType.CALL)
         self.fn = fn
@@ -52,6 +49,7 @@ class Call(Effect):
 @dataclass
 class Put(Effect):
     """Effect for updating state"""
+
     def __init__(self, update: dict | Callable):
         super().__init__(EffectType.PUT, update)
 
@@ -59,6 +57,7 @@ class Put(Effect):
 @dataclass
 class Select(Effect):
     """Effect for selecting from state"""
+
     def __init__(self, selector: Optional[Callable] = None):
         super().__init__(EffectType.SELECT, selector)
 
@@ -66,6 +65,7 @@ class Select(Effect):
 @dataclass
 class Log(Effect):
     """Effect for logging"""
+
     def __init__(self, level: str, message: str):
         super().__init__(EffectType.LOG)
         self.level = level
@@ -75,6 +75,7 @@ class Log(Effect):
 @dataclass
 class Stop(Effect):
     """Effect for stopping the saga execution with error"""
+
     def __init__(self, message: Optional[str] = None):
         super().__init__(EffectType.STOP, message)
 
@@ -82,13 +83,10 @@ class Stop(Effect):
 @dataclass
 class Complete(Effect):
     """Effect for completing the saga execution with success"""
+
     def __init__(self, message: Optional[str] = None):
         super().__init__(EffectType.COMPLETE, message)
 
-
-# ============================================================================
-# Base State Management
-# ============================================================================
 
 @dataclass
 class BaseSagaState:
@@ -98,42 +96,44 @@ class BaseSagaState:
     transcript_path: Optional[str] = None
     cwd: Optional[str] = None
     hook_event_name: Optional[str] = None
-    
+
     # Hook response fields (output)
     continue_: bool = True  # Whether Claude should continue after hook execution
     stopReason: Optional[str] = None  # Message shown when continue is false
     suppressOutput: bool = False  # Hide stdout from transcript mode
     systemMessage: Optional[str] = None  # Optional message to display, shown when continue is true
-    
+
     # Raw input data for additional fields
     input_data: Optional[dict] = None
-    
+
     # Additional metadata
     metadata: dict = field(default_factory=dict)
-    
+
     def to_json(self) -> dict:
         """Convert state to JSON response for hook output"""
         response = {
             "continue": self.continue_,
             "suppressOutput": self.suppressOutput
         }
-        
+
         if self.stopReason:
             response["stopReason"] = self.stopReason
-            
+
         if self.systemMessage:
             response["systemMessage"] = self.systemMessage
-            
+
         # Add any additional fields from metadata
         response.update(self.metadata)
-        
+
         return response
+
 
 # ============================================================================
 # Common Side Effect Functions (Impure)
 # ============================================================================
 
-def run_command_effect(cmd: str, cwd: Optional[str] = None, capture_output: bool = True) -> Optional[subprocess.CompletedProcess]:
+def run_command_effect(cmd: str, cwd: Optional[str] = None, capture_output: bool = True) -> Optional[
+    subprocess.CompletedProcess]:
     """Run a shell command and return the result"""
     try:
         result = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=capture_output, text=True)
@@ -197,9 +197,9 @@ def connect_pycharm_debugger_effect():
     try:
         import pydevd_pycharm
         pydevd_pycharm.settrace(
-            'localhost', 
-            port=12345, 
-            stdoutToServer=True, 
+            'localhost',
+            port=12345,
+            stdoutToServer=True,
             stderrToServer=True
         )
         return True
@@ -208,17 +208,18 @@ def connect_pycharm_debugger_effect():
     except Exception as e:
         raise RuntimeError(f"Could not connect to debugger: {e}")
 
+
 # ============================================================================
 # Saga Runtime
 # ============================================================================
 
 class SagaRuntime:
     """Runtime for executing sagas"""
-    
+
     def __init__(self, initial_state: BaseSagaState):
         self.state = initial_state
         self.stopped = False
-    
+
     def run(self, saga: Generator) -> BaseSagaState:
         """Run a saga to completion"""
         saga_name = saga.gi_code.co_name if hasattr(saga, 'gi_code') else 'unknown'
@@ -234,14 +235,14 @@ class SagaRuntime:
             log_error(f"Saga runtime error in '{saga_name}': {e}")
             self.state.continue_ = False
             self.state.stopReason = f"Saga runtime error: {e}"
-        
+
         return self.state
-    
+
     def _handle_effect(self, effect: Effect) -> Any:
         """Handle an effect and return its result"""
         if not isinstance(effect, Effect):
             return None
-        
+
         match effect.type:
             case EffectType.CALL:
                 return self._handle_call(effect)
@@ -257,7 +258,7 @@ class SagaRuntime:
                 return self._handle_complete(effect)
             case _:
                 return None
-    
+
     def _handle_call(self, effect: Call) -> Any:
         """Handle a CALL effect"""
         try:
@@ -265,7 +266,7 @@ class SagaRuntime:
         except Exception as e:
             log_error(f"Call effect failed: {e}")
             return None
-    
+
     def _handle_put(self, effect: Put) -> None:
         """Handle a PUT effect to update state"""
         if isinstance(effect.payload, dict):
@@ -273,13 +274,13 @@ class SagaRuntime:
                 setattr(self.state, key, value)
         elif callable(effect.payload):
             self.state = effect.payload(self.state)
-    
+
     def _handle_select(self, effect: Select) -> BaseSagaState:
         """Handle a SELECT effect to get state"""
         if effect.payload and callable(effect.payload):
             return effect.payload(self.state)
         return self.state
-    
+
     def _handle_log(self, effect: Log) -> None:
         """Handle a LOG effect"""
         match effect.level:
@@ -289,21 +290,21 @@ class SagaRuntime:
                 log_info(effect.message)
             case "error":
                 log_error(effect.message)
-    
+
     def _handle_stop(self, effect: Stop) -> None:
         """Handle a STOP effect - stop saga execution with error"""
         self.stopped = True
         self.state.continue_ = False
         if effect.payload:  # Set stopReason from the Stop message
             self.state.stopReason = effect.payload
-    
+
     def _handle_complete(self, effect: Complete) -> None:
         """Handle a COMPLETE effect - stop saga execution with success"""
         self.stopped = True
         self.state.continue_ = True
         if effect.payload:  # Set systemMessage from the Complete message
             self.state.systemMessage = effect.payload
-        
+
 
 # ============================================================================
 # Common Hook Sagas
@@ -319,10 +320,10 @@ def parse_json_saga():
     """Parse CC hooks default / standard JSON input from stdin - see CC hooks docs - https://docs.anthropic.com/en/docs/claude-code/hooks """
     try:
         input_data = json.load(sys.stdin)
-        
+
         # Store raw input
         yield Put({"input_data": input_data})
-        
+
         # Extract common hook fields into state
         update = {}
         if "session_id" in input_data:
@@ -333,9 +334,9 @@ def parse_json_saga():
             update["cwd"] = input_data["cwd"]
         if "hook_event_name" in input_data:
             update["hook_event_name"] = input_data["hook_event_name"]
-            
+
         if update:
             yield Put(update)
-            
+
     except json.JSONDecodeError as e:
         yield Stop(f"Invalid JSON input: {e}")
