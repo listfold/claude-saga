@@ -1,6 +1,6 @@
-energy efficient undo
 
-use git to walkback angentic changes.
+HELLO WORLD
+
 
 TODO:
 install script should update settings.json and should chmod+x the hooks.
