@@ -16,19 +16,8 @@ while maintaining the same functionality and behavior.
 import json
 import re
 import sys
-from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Tuple
-
-# Import the saga framework from parent directory
-# TODO depend on claude-saga when it's published.
-import importlib.util
-
-spec = importlib.util.spec_from_file_location("claude_saga", Path(__file__).parent.parent / "claude_saga" / "__init__.py")
-claude_saga = importlib.util.module_from_spec(spec)
-sys.modules["claude_saga"] = claude_saga
-spec.loader.exec_module(claude_saga)
-
 from claude_saga import (
     BaseSagaState, SagaRuntime,
     Call, Put, Select, Log, Stop, Complete,

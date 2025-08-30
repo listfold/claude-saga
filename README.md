@@ -5,7 +5,7 @@ A side-effect manager for Python scripts, specifically designed for building mai
 Unstable - API subject to change.
 
 ## Quick Start
-### Conceptual overview - What is a saga?
+### Conceptual overview
 ```python
 from claude_saga import (
     BaseSagaState, SagaRuntime,
@@ -22,12 +22,12 @@ class State(BaseSagaState):
 
 def my_saga():
     yield Log("info", "Starting saga")
-    state = yield Select()
-    math_result = yield Call(add, state.math_result, 3)
+    initial_state = yield Select()
+    math_result = yield Call(add, initial_state.math_result, 3)
     command_result = yield Call(run_command_effect, "echo 'Hello World'")
     if command_result is None:
         yield Log("error", "unable to run command")
-        yield Stop("hook exited early")
+        yield Stop("hook failed, exited early")
     yield Put({"command_result": command_result.stdout, "math_result": math_result})
     yield Complete("Saga completed successfully")
 
@@ -38,7 +38,7 @@ print(final_state.to_json())
 
 ## Building Claude Code Hooks
 
-Claude Saga is specifically designed to handle input/output conventions of claude code hooks:
+Claude Saga handles input/output conventions of claude code hooks:
 
 ```python
 #!/usr/bin/env python
@@ -58,7 +58,7 @@ def main_saga():
     # Validate and parse input
     # https://docs.anthropic.com/en/docs/claude-code/hooks#hook-input
     yield from validate_input_saga()
-    # Adds hook input to state
+    # Adds input data to state
     yield from parse_json_saga()
     
     # Your hook logic here
@@ -146,13 +146,19 @@ Pre-built sagas for common tasks:
 - `validate_input_saga()` - Validate stdin input is provided
 - `parse_json_saga()` - Parse JSON from stdin into hook state (parses specifically for [Claude Code hook input](https://docs.anthropic.com/en/docs/claude-code/hooks#hook-input))
 
-## Examples
+# Development
+
+### Setup
+
+```bash
+uv pip install -e .
+```
+### Examples
 
 The `examples/` directory contains a practical demonstration:
 
 - `simple_command_validator.py` - Claude Code hook for validating bash commands (saga version of the [official example](https://docs.anthropic.com/en/docs/claude-code/hooks#exit-code-example%3A-bash-command-validation))
 
-Run the example with:
 ```bash
 # This will fail since the expected input to stdin is not provided
 uv run examples/simple_command_validator.py
@@ -164,15 +170,6 @@ echo '{"tool_name": "Bash", "tool_input": {"command": "ls -la"}}' | uv run examp
 echo '{"tool_name": "Bash", "tool_input": {"command": "grep pattern file.txt"}}' | uv run examples/simple_command_validator.py
 
 ```
-
-## Development
-
-### Setup
-Install development dependencies:
-```bash
-uv sync --dev
-```
-
 ### Running Tests
 
 #### Unit Tests
@@ -209,7 +206,9 @@ I'd like to hear what common effects can be added to the core lib. e.g.
 - http_request_effect
 - mcp_request_effect
 
-Future work can incorporate
-- parsing for each hook's unique input/output behaviors, fields etc...
-- retry failed effects
-- parrellize effects (`All`), see hypothetical async effects like `mcp_request` etc...
+Future work must incorporate
+- parsing & validation for each hook's unique input/output behaviors, fields etc...
+- retry-able effects
+- cancel-able effects
+- parallel effects (e.g. `All`), see hypothetical async effects like `mcp_request` etc...
+- concurrent effects
