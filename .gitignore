@@ -150,3 +150,7 @@ uv.lock
 # claude
 .claude
 .claude-logs
+
+# testing
+*/__pycache__/*
+tests/__pycache__/
