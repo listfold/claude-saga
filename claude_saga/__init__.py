@@ -2,21 +2,22 @@
 Claude Saga Framework - A Redux Saga-like effect system for Python
 """
 
+import json
 import os
 import subprocess
 import sys
-import json
-from pathlib import Path
-from typing import Any, Generator, Optional, Callable, TypeVar, Generic
+from collections.abc import Callable, Generator
 from dataclasses import dataclass, field
 from enum import Enum, auto
-
+from pathlib import Path
+from typing import Any
 
 __version__ = "0.1.0"
 
 
 class EffectType(Enum):
     """Types of effects that can be yielded from sagas"""
+
     CALL = auto()  # Call a function with or without side effects
     PUT = auto()  # Update state
     SELECT = auto()  # Select from state
@@ -28,6 +29,7 @@ class EffectType(Enum):
 @dataclass
 class Effect:
     """Base class for all effects"""
+
     type: EffectType
     payload: Any = None
 
@@ -55,7 +57,7 @@ class Put(Effect):
 class Select(Effect):
     """Effect for selecting from state"""
 
-    def __init__(self, selector: Optional[Callable] = None):
+    def __init__(self, selector: Callable | None = None):
         super().__init__(EffectType.SELECT, selector)
 
 
@@ -73,7 +75,7 @@ class Log(Effect):
 class Stop(Effect):
     """Effect for stopping the saga execution with error"""
 
-    def __init__(self, message: Optional[str] = None):
+    def __init__(self, message: str | None = None):
         super().__init__(EffectType.STOP, message)
 
 
@@ -81,39 +83,39 @@ class Stop(Effect):
 class Complete(Effect):
     """Effect for completing the saga execution with success"""
 
-    def __init__(self, message: Optional[str] = None):
+    def __init__(self, message: str | None = None):
         super().__init__(EffectType.COMPLETE, message)
 
 
 @dataclass
 class BaseSagaState:
     """Base state object that can be extended by specific hooks"""
+
     # Common input fields from hook
     # https://docs.anthropic.com/en/docs/claude-code/hooks#hook-input
-    session_id: Optional[str] = None
-    transcript_path: Optional[str] = None
-    cwd: Optional[str] = None
-    hook_event_name: Optional[str] = None
+    session_id: str | None = None
+    transcript_path: str | None = None
+    cwd: str | None = None
+    hook_event_name: str | None = None
 
     # Hook response fields (output)
     # https://docs.anthropic.com/en/docs/claude-code/hooks#hook-output
     continue_: bool = True  # Whether Claude should continue after hook execution
-    stopReason: Optional[str] = None  # Message shown when continue is false
+    stopReason: str | None = None  # Message shown when continue is false
     suppressOutput: bool = False  # Hide stdout from transcript mode
-    systemMessage: Optional[str] = None  # Optional message to display, shown when continue is true
+    systemMessage: str | None = (
+        None  # Optional message to display, shown when continue is true
+    )
 
     # Raw input data for additional fields
-    input_data: Optional[dict] = None
+    input_data: dict | None = None
 
     # Additional metadata
     metadata: dict = field(default_factory=dict)
 
     def to_json(self) -> dict:
         """Convert state to JSON response for hook output"""
-        response = {
-            "continue": self.continue_,
-            "suppressOutput": self.suppressOutput
-        }
+        response = {"continue": self.continue_, "suppressOutput": self.suppressOutput}
 
         if self.stopReason:
             response["stopReason"] = self.stopReason
@@ -131,15 +133,20 @@ class BaseSagaState:
 # Common Side Effect Functions (Impure)
 # ============================================================================
 
-def run_command_effect(cmd: str, cwd: Optional[str] = None, capture_output: bool = True) -> subprocess.CompletedProcess:
+
+def run_command_effect(
+    cmd: str, cwd: str | None = None, capture_output: bool = True
+) -> subprocess.CompletedProcess:
     """Run a shell command and return the result"""
-    return subprocess.run(cmd, shell=True, cwd=cwd, capture_output=capture_output, text=True)
+    return subprocess.run(
+        cmd, shell=True, cwd=cwd, capture_output=capture_output, text=True
+    )
 
 
 def write_file_effect(path: Path, content: str) -> bool:
     """Write content to a file"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, 'w') as f:
+    with open(path, "w") as f:
         f.write(content)
     return True
 
@@ -160,22 +167,24 @@ def create_directory_effect(path: Path) -> bool:
 # Logging Effects
 # ============================================================================
 
+
 def log_debug(message: str):
     if os.environ.get("DEBUG", "0") == "1":
-        print(f'[DEBUG] {message}')
+        print(f"[DEBUG] {message}")
 
 
 def log_info(message: str):
-    print(f'[INFO] {message}')
+    print(f"[INFO] {message}")
 
 
 def log_error(message: str):
-    print(f'[ERROR] {message}', file=sys.stderr)
+    print(f"[ERROR] {message}", file=sys.stderr)
 
 
 # ============================================================================
 # Custom Effects, generally useful
 # ============================================================================
+
 
 def check_stdin_tty_effect() -> bool:
     """Check if stdin is a terminal (no piped input)"""
@@ -190,11 +199,9 @@ def read_json_stdin_effect() -> dict:
 def connect_pycharm_debugger_effect():
     """Effect function to connect to PyCharm debugger"""
     import pydevd_pycharm
+
     pydevd_pycharm.settrace(
-        'localhost',
-        port=12345,
-        stdoutToServer=True,
-        stderrToServer=True
+        "localhost", port=12345, stdoutToServer=True, stderrToServer=True
     )
     return True
 
@@ -202,6 +209,7 @@ def connect_pycharm_debugger_effect():
 # ============================================================================
 # Saga Runtime
 # ============================================================================
+
 
 class SagaRuntime:
     """Runtime for executing sagas"""
@@ -212,7 +220,7 @@ class SagaRuntime:
 
     def run(self, saga: Generator) -> BaseSagaState:
         """Run a saga to completion"""
-        saga_name = saga.gi_code.co_name if hasattr(saga, 'gi_code') else 'unknown'
+        saga_name = saga.gi_code.co_name if hasattr(saga, "gi_code") else "unknown"
         try:
             effect = None
             while not self.stopped:
@@ -300,6 +308,7 @@ class SagaRuntime:
 # Common Hook Sagas
 # ============================================================================
 
+
 def validate_input_saga():
     """Validate that input is provided via stdin"""
     is_tty = yield Call(check_stdin_tty_effect)
@@ -308,17 +317,21 @@ def validate_input_saga():
 
 
 def parse_json_saga():
-    """Parse CC hooks default / standard JSON input from stdin, and store it in the saga state - see CC hooks docs - https://docs.anthropic.com/en/docs/claude-code/hooks """
+    """
+    Parse CC hooks default / standard JSON input from stdin,
+    and store it in the saga state - see CC hooks docs:
+    https://docs.anthropic.com/en/docs/claude-code/hooks
+    """
     input_data = yield Call(read_json_stdin_effect)
-    
+
     # If reading failed (e.g., invalid JSON), Call returns None
     if input_data is None:
         yield Stop("Invalid JSON input from stdin")
         return
-    
+
     # Store raw input
     yield Put({"input_data": input_data})
-    
+
     # Extract common hook fields into state
     update = {}
     if "session_id" in input_data:
@@ -329,40 +342,34 @@ def parse_json_saga():
         update["cwd"] = input_data["cwd"]
     if "hook_event_name" in input_data:
         update["hook_event_name"] = input_data["hook_event_name"]
-    
+
     if update:
         yield Put(update)
 
 
 # Export all public APIs
 __all__ = [
-    # Version
-    "__version__",
-    # Effect types
-    "EffectType",
-    "Effect",
-    "Call",
-    "Put",
-    "Select",
-    "Log",
-    "Stop",
-    "Complete",
-    # State
     "BaseSagaState",
-    # Runtime
+    "Call",
+    "Complete",
+    "Effect",
+    "EffectType",
+    "Log",
+    "Put",
     "SagaRuntime",
-    # Common effects
-    "run_command_effect",
-    "write_file_effect",
+    "Select",
+    "Stop",
+    "__version__",
     "change_directory_effect",
+    "check_stdin_tty_effect",
+    "connect_pycharm_debugger_effect",
     "create_directory_effect",
     "log_debug",
-    "log_info",
     "log_error",
-    "check_stdin_tty_effect",
-    "read_json_stdin_effect",
-    "connect_pycharm_debugger_effect",
-    # Common sagas
-    "validate_input_saga",
+    "log_info",
     "parse_json_saga",
+    "read_json_stdin_effect",
+    "run_command_effect",
+    "validate_input_saga",
+    "write_file_effect",
 ]
