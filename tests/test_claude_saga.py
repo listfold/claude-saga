@@ -15,7 +15,6 @@ Tests the core saga effects, runtime, and state management.
 # Import the saga framework
 import importlib.util
 import json
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -397,9 +396,9 @@ class TestCommonEffects:
     @patch("subprocess.run")
     def test_run_command_effect_exception(self, mock_run):
         """Test run_command_effect raises exception (handled by runtime)"""
-        mock_run.side_effect = Exception("command failed")
+        mock_run.side_effect = RuntimeError("command failed")
 
-        with pytest.raises(subprocess.CalledProcessError):
+        with pytest.raises(RuntimeError):
             run_command_effect("failing command")
 
     @patch("builtins.open")
@@ -418,7 +417,7 @@ class TestCommonEffects:
     def test_write_file_effect_exception(self):
         """Test write_file_effect raises exception (handled by runtime)"""
         # Use a path that will cause an error
-        with pytest.raises(subprocess.CalledProcessError):
+        with pytest.raises(OSError):
             write_file_effect(Path("/invalid/path/test.txt"), "content")
 
 
