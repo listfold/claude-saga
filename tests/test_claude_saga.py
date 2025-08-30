@@ -279,6 +279,7 @@ class TestSagaRuntime:
         
         def test_saga():
             result = yield Call(failing_function)
+            # result should be None when exception is caught
             yield Put({"counter": result or -1})
         
         with patch('claude_saga.log_error') as mock_log:
@@ -287,6 +288,35 @@ class TestSagaRuntime:
             
             mock_log.assert_called()
             assert final_state.counter == -1  # None from failed call -> -1
+    
+    def test_effect_functions_with_call(self):
+        """Test that effect functions work properly through Call"""
+        def test_saga():
+            # Test successful call
+            success = yield Call(create_directory_effect, Path("./test"))
+            yield Put({"counter": 1 if success else 0})
+        
+        with patch('pathlib.Path.mkdir') as mock_mkdir:
+            runtime = SagaRuntime(MockState())
+            final_state = runtime.run(test_saga())
+            
+            assert final_state.counter == 1  # Should succeed
+            mock_mkdir.assert_called_once()
+    
+    def test_effect_functions_failure_with_call(self):
+        """Test that effect function failures are handled by runtime"""
+        def test_saga():
+            # Test failed call
+            success = yield Call(create_directory_effect, Path("/invalid/path"))
+            yield Put({"counter": 1 if success else -1})
+        
+        with patch('pathlib.Path.mkdir', side_effect=Exception("Permission denied")):
+            with patch('claude_saga.log_error') as mock_log:
+                runtime = SagaRuntime(MockState())
+                final_state = runtime.run(test_saga())
+                
+                assert final_state.counter == -1  # Should fail (None -> False -> -1)
+                mock_log.assert_called()
     
     def test_saga_exception_handling(self):
         """Test saga runtime exception handling"""
@@ -335,12 +365,11 @@ class TestCommonEffects:
     
     @patch('subprocess.run')
     def test_run_command_effect_exception(self, mock_run):
-        """Test run_command_effect exception handling"""
+        """Test run_command_effect raises exception (handled by runtime)"""
         mock_run.side_effect = Exception("command failed")
         
-        result = run_command_effect("failing command")
-        
-        assert result is None
+        with pytest.raises(Exception):
+            run_command_effect("failing command")
     
     @patch('builtins.open')
     @patch('pathlib.Path.mkdir')
@@ -356,11 +385,10 @@ class TestCommonEffects:
         mock_file.write.assert_called_once_with("content")
     
     def test_write_file_effect_exception(self):
-        """Test write_file_effect exception handling"""
+        """Test write_file_effect raises exception (handled by runtime)"""
         # Use a path that will cause an error
-        result = write_file_effect(Path("/invalid/path/test.txt"), "content")
-        
-        assert result == False
+        with pytest.raises(Exception):
+            write_file_effect(Path("/invalid/path/test.txt"), "content")
 
 
 class TestCommonSagas:
@@ -368,7 +396,7 @@ class TestCommonSagas:
     
     def test_validate_input_saga_with_stdin(self):
         """Test validate_input_saga when stdin is available"""
-        with patch('sys.stdin.isatty', return_value=False):
+        with patch('claude_saga.check_stdin_tty_effect', return_value=False):
             def test_saga():
                 yield from validate_input_saga()
                 yield Put({"counter": 1})
@@ -381,7 +409,7 @@ class TestCommonSagas:
     
     def test_validate_input_saga_without_stdin(self):
         """Test validate_input_saga when no stdin is available"""
-        with patch('sys.stdin.isatty', return_value=True):
+        with patch('claude_saga.check_stdin_tty_effect', return_value=True):
             def test_saga():
                 yield from validate_input_saga()
                 yield Put({"counter": 1})  # Should not execute
@@ -398,7 +426,7 @@ class TestCommonSagas:
         """Test parse_json_saga with valid JSON"""
         test_json = {"session_id": "123", "cwd": "/test", "tool_name": "Bash"}
         
-        with patch('json.load', return_value=test_json):
+        with patch('claude_saga.read_json_stdin_effect', return_value=test_json):
             def test_saga():
                 yield from parse_json_saga()
                 
@@ -410,16 +438,18 @@ class TestCommonSagas:
             assert final_state.cwd == "/test"
     
     def test_parse_json_saga_invalid_input(self):
-        """Test parse_json_saga with invalid JSON"""
-        with patch('json.load', side_effect=json.JSONDecodeError("Invalid JSON", "", 0)):
-            def test_saga():
-                yield from parse_json_saga()
+        """Test parse_json_saga with invalid JSON (effect returns None on exception)"""
+        # When read_json_stdin_effect raises an exception, _handle_call returns None
+        with patch('claude_saga.read_json_stdin_effect', side_effect=json.JSONDecodeError("Invalid JSON", "", 0)):
+            with patch('claude_saga.log_error'):  # Mock log_error to avoid output during test
+                def test_saga():
+                    yield from parse_json_saga()
+                    
+                runtime = SagaRuntime(MockState())
+                final_state = runtime.run(test_saga())
                 
-            runtime = SagaRuntime(MockState())
-            final_state = runtime.run(test_saga())
-            
-            assert final_state.continue_ == False
-            assert "Invalid JSON input" in final_state.stopReason
+                assert final_state.continue_ == False
+                assert "Invalid JSON input" in final_state.stopReason
 
 
 @pytest.mark.parametrize("level,expected_function", [

@@ -13,12 +13,6 @@ authors = [
     { name = "Iain", email = "" }
 ]
 dependencies = []
-
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0.0",
-]
-
 keywords = [
     "saga",
     "effects",
@@ -38,6 +32,11 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Software Development :: Libraries",
     "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
 ]
 
 [project.urls]

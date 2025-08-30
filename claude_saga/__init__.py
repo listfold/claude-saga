@@ -1,6 +1,5 @@
 """
 Claude Saga Framework - A Redux Saga-like effect system for Python
-This module provides reusable saga infrastructure for claude-code hooks.
 """
 
 import os
@@ -18,7 +17,7 @@ __version__ = "0.1.0"
 
 class EffectType(Enum):
     """Types of effects that can be yielded from sagas"""
-    CALL = auto()  # Call a function with side effects
+    CALL = auto()  # Call a function with or without side effects
     PUT = auto()  # Update state
     SELECT = auto()  # Select from state
     LOG = auto()  # Log a message
@@ -90,12 +89,14 @@ class Complete(Effect):
 class BaseSagaState:
     """Base state object that can be extended by specific hooks"""
     # Common input fields from hook
+    # https://docs.anthropic.com/en/docs/claude-code/hooks#hook-input
     session_id: Optional[str] = None
     transcript_path: Optional[str] = None
     cwd: Optional[str] = None
     hook_event_name: Optional[str] = None
 
     # Hook response fields (output)
+    # https://docs.anthropic.com/en/docs/claude-code/hooks#hook-output
     continue_: bool = True  # Whether Claude should continue after hook execution
     stopReason: Optional[str] = None  # Message shown when continue is false
     suppressOutput: bool = False  # Hide stdout from transcript mode
@@ -130,43 +131,29 @@ class BaseSagaState:
 # Common Side Effect Functions (Impure)
 # ============================================================================
 
-def run_command_effect(cmd: str, cwd: Optional[str] = None, capture_output: bool = True) -> Optional[
-    subprocess.CompletedProcess]:
+def run_command_effect(cmd: str, cwd: Optional[str] = None, capture_output: bool = True) -> subprocess.CompletedProcess:
     """Run a shell command and return the result"""
-    try:
-        result = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=capture_output, text=True)
-        return result
-    except Exception as e:
-        return None
+    return subprocess.run(cmd, shell=True, cwd=cwd, capture_output=capture_output, text=True)
 
 
 def write_file_effect(path: Path, content: str) -> bool:
     """Write content to a file"""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, 'w') as f:
-            f.write(content)
-        return True
-    except Exception as e:
-        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'w') as f:
+        f.write(content)
+    return True
 
 
 def change_directory_effect(path: str) -> bool:
     """Change the current working directory"""
-    try:
-        os.chdir(path)
-        return True
-    except Exception as e:
-        return False
+    os.chdir(path)
+    return True
 
 
 def create_directory_effect(path: Path) -> bool:
     """Create a directory"""
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        return True
-    except Exception as e:
-        return False
+    path.mkdir(parents=True, exist_ok=True)
+    return True
 
 
 # ============================================================================
@@ -190,21 +177,26 @@ def log_error(message: str):
 # Custom Effects, generally useful
 # ============================================================================
 
+def check_stdin_tty_effect() -> bool:
+    """Check if stdin is a terminal (no piped input)"""
+    return sys.stdin.isatty()
+
+
+def read_json_stdin_effect() -> dict:
+    """Read and parse JSON from stdin"""
+    return json.load(sys.stdin)
+
+
 def connect_pycharm_debugger_effect():
     """Effect function to connect to PyCharm debugger"""
-    try:
-        import pydevd_pycharm
-        pydevd_pycharm.settrace(
-            'localhost',
-            port=12345,
-            stdoutToServer=True,
-            stderrToServer=True
-        )
-        return True
-    except ImportError:
-        raise ImportError("pydevd-pycharm package not installed")
-    except Exception as e:
-        raise RuntimeError(f"Could not connect to debugger: {e}")
+    import pydevd_pycharm
+    pydevd_pycharm.settrace(
+        'localhost',
+        port=12345,
+        stdoutToServer=True,
+        stderrToServer=True
+    )
+    return True
 
 
 # ============================================================================
@@ -310,34 +302,36 @@ class SagaRuntime:
 
 def validate_input_saga():
     """Validate that input is provided via stdin"""
-    if sys.stdin.isatty():
+    is_tty = yield Call(check_stdin_tty_effect)
+    if is_tty:
         yield Stop("No input provided. This script expects JSON input via stdin.")
 
 
 def parse_json_saga():
-    """Parse CC hooks default / standard JSON input from stdin - see CC hooks docs - https://docs.anthropic.com/en/docs/claude-code/hooks """
-    try:
-        input_data = json.load(sys.stdin)
-
-        # Store raw input
-        yield Put({"input_data": input_data})
-
-        # Extract common hook fields into state
-        update = {}
-        if "session_id" in input_data:
-            update["session_id"] = input_data["session_id"]
-        if "transcript_path" in input_data:
-            update["transcript_path"] = input_data["transcript_path"]
-        if "cwd" in input_data:
-            update["cwd"] = input_data["cwd"]
-        if "hook_event_name" in input_data:
-            update["hook_event_name"] = input_data["hook_event_name"]
-
-        if update:
-            yield Put(update)
-
-    except json.JSONDecodeError as e:
-        yield Stop(f"Invalid JSON input: {e}")
+    """Parse CC hooks default / standard JSON input from stdin, and store it in the saga state - see CC hooks docs - https://docs.anthropic.com/en/docs/claude-code/hooks """
+    input_data = yield Call(read_json_stdin_effect)
+    
+    # If reading failed (e.g., invalid JSON), Call returns None
+    if input_data is None:
+        yield Stop("Invalid JSON input from stdin")
+        return
+    
+    # Store raw input
+    yield Put({"input_data": input_data})
+    
+    # Extract common hook fields into state
+    update = {}
+    if "session_id" in input_data:
+        update["session_id"] = input_data["session_id"]
+    if "transcript_path" in input_data:
+        update["transcript_path"] = input_data["transcript_path"]
+    if "cwd" in input_data:
+        update["cwd"] = input_data["cwd"]
+    if "hook_event_name" in input_data:
+        update["hook_event_name"] = input_data["hook_event_name"]
+    
+    if update:
+        yield Put(update)
 
 
 # Export all public APIs
@@ -365,6 +359,8 @@ __all__ = [
     "log_debug",
     "log_info",
     "log_error",
+    "check_stdin_tty_effect",
+    "read_json_stdin_effect",
     "connect_pycharm_debugger_effect",
     # Common sagas
     "validate_input_saga",

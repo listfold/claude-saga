@@ -112,14 +112,11 @@ def output_results_saga():
     state = yield Select()
     
     if state.issues:
-        # Print issues to stderr (matches original)
         for message in state.issues:
             yield Log("error", f"• {message}")
         
-        # Block tool call (exit code 2)
         yield Stop("Validation issues found")
     else:
-        # No issues - allow command (exit code 0)
         yield Complete("Command validation passed")
 
 
