@@ -12,7 +12,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 
 class EffectType(Enum):

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-saga"
-version = "0.1.0"
+version = "0.1.1"
 description = "A Redux Saga-like effect system for Python, designed for Claude Code hooks"
 readme = "README.md"
 requires-python = ">=3.12"
