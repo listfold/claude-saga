@@ -41,9 +41,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/claude-saga"
-Repository = "https://github.com/yourusername/claude-saga"
-Issues = "https://github.com/yourusername/claude-saga/issues"
+Homepage = "https://github.com/listfold/claude-saga"
+Repository = "https://github.com/listfold/claude-saga"
+Issues = "https://github.com/listfold/claude-saga/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["claude_saga"]
